@@ -4,6 +4,8 @@ import com.example.SettingsPanel;
 import burp.api.montoya.*;
 import burp.api.montoya.extension.ExtensionUnloadingHandler;
 import burp.api.montoya.http.handler.*;
+import burp.api.montoya.core.ToolType;
+import burp.api.montoya.http.message.requests.HttpRequest;
 
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
@@ -35,25 +37,76 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         api.http().registerHttpHandler(new HttpHandler() {
             @Override
             public RequestToBeSentAction handleHttpRequestToBeSent(HttpRequestToBeSent request) {
-                String method = request.method();
-                String host = request.httpService().host();
-                String path = request.pathWithoutQuery();
-                String uniqueKey = host + "|" + path;
-
-                if (api.scope().isInScope(request.url()) && !isExcluded(path) && loggedRequests.add(uniqueKey)) {
-                    SwingUtilities.invokeLater(() -> {
-                        tableModel.insertRow(0, new Object[]{method, host, path, false, false});
-                        saveTableData();
-                    });
-                }
                 return RequestToBeSentAction.continueWith(request);
             }
 
             @Override
             public ResponseReceivedAction handleHttpResponseReceived(HttpResponseReceived response) {
+                HttpRequest request = response.initiatingRequest();
+                int statusCode = response.statusCode();
+
+                if (statusCode >= 404) {
+                    return ResponseReceivedAction.continueWith(response);
+                }
+
+                ToolType sourceType = response.toolSource().toolType();
+                boolean isScanner = sourceType == ToolType.SCANNER;
+                boolean isExtension = sourceType == ToolType.EXTENSIONS;
+
+                if (isExtension) {
+                    return ResponseReceivedAction.continueWith(response);
+                }
+
+                String method = request.method();
+                String host = request.httpService().host();
+                String path = request.pathWithoutQuery();
+                String pathQuery = request.path();
+                String uniqueKey = host + "|" + path;
+
+                if (api.scope().isInScope(request.url()) && !isExcluded(path)) {
+                    SwingUtilities.invokeLater(() -> {
+                        Boolean scanned = isScanner;
+                        Boolean rejected = false;
+
+                        for (int i = 0; i < tableModel.getRowCount(); i++) {
+                            String existingHost = tableModel.getValueAt(i, 1).toString();
+                            String existingPath = tableModel.getValueAt(i, 2).toString();
+                            if (host.equals(existingHost) && path.equals(existingPath)) {
+                                scanned = scanned || Boolean.TRUE.equals(tableModel.getValueAt(i, 3));
+                                rejected = Boolean.TRUE.equals(tableModel.getValueAt(i, 4));
+                                tableModel.removeRow(i);
+                                break;
+                            }
+                        }
+
+                        if (!scanned && !rejected) {
+                            tableModel.insertRow(0, new Object[]{method, host, pathQuery, scanned, rejected});
+                        } else {
+                            tableModel.addRow(new Object[]{method, host, pathQuery, scanned, rejected});
+                        }
+
+                        loggedRequests.add(uniqueKey);
+                        saveTableData();
+                    });
+                }
                 return ResponseReceivedAction.continueWith(response);
             }
         });
+    }
+
+    private void loadSavedSettings() {
+        try {
+            File configFile = new File(System.getProperty("user.home"), "AppData/Local/RecheckScan/scan_api.txt");
+            if (configFile.exists()) {
+                List<String> lines = Files.readAllLines(configFile.toPath());
+                if (lines.size() >= 2) {
+                    savedExtensions = lines.get(0).trim();
+                    savedOutputPath = lines.get(1).trim();
+                }
+            }
+        } catch (IOException e) {
+            api.logging().logToError("Failed to load settings: " + e.getMessage());
+        }
     }
 
     private void createUI() {
@@ -149,7 +202,15 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             savedOutputPath = outputPathField.getText().trim();
 
             try {
-                File configFile = new File(System.getProperty("user.home"), ".BurpSuite/scan_api.txt");
+                File configFile = new File(System.getProperty("user.home"), "AppData/Local/RecheckScan/scan_api.txt");
+                File parentDir = configFile.getParentFile();
+
+                if (!parentDir.exists()) {
+                    boolean created = parentDir.mkdirs();
+                    if (!created) {
+                        System.err.println("Không thể tạo thư mục: " + parentDir.getAbsolutePath());
+                    }
+                }
                 try (BufferedWriter writer = new BufferedWriter(new FileWriter(configFile))) {
                     writer.write(savedExtensions);
                     writer.newLine();
@@ -173,21 +234,6 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         JPanel mainPanel = new JPanel(new BorderLayout());
         mainPanel.add(tabs, BorderLayout.CENTER);
         api.userInterface().registerSuiteTab("Recheck Scan", mainPanel);
-    }
-
-    private void loadSavedSettings() {
-        try {
-            File configFile = new File(System.getProperty("user.home"), ".BurpSuite/scan_api.txt");
-            if (configFile.exists()) {
-                List<String> lines = Files.readAllLines(configFile.toPath());
-                if (lines.size() >= 2) {
-                    savedExtensions = lines.get(0).trim();
-                    savedOutputPath = lines.get(1).trim();
-                }
-            }
-        } catch (IOException e) {
-            api.logging().logToError("Failed to load settings: " + e.getMessage());
-        }
     }
 
     private void loadLogData() {
@@ -218,7 +264,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     private File getLogFile() {
         return (savedOutputPath != null && !savedOutputPath.isBlank())
                 ? new File(savedOutputPath)
-                : new File(System.getProperty("user.home"), ".BurpSuite/scan_api_log.csv");
+                : new File(System.getProperty("user.home"), "AppData/Local/RecheckScan/scan_api_log.csv");
     }
 
     private void saveTableData() {
