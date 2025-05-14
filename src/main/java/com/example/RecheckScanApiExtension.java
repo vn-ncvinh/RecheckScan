@@ -144,7 +144,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         tableModel = new DefaultTableModel(new Object[]{"Method", "Host", "Path", "Note", "Scanned", "Rejected"}, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
-                return column == 2 || column == 4 || column == 5;
+                return column == 2 || column == 5;
             }
             @Override
             public Class<?> getColumnClass(int columnIndex) {
@@ -169,16 +169,16 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         // Copy path
         table.getInputMap().put(KeyStroke.getKeyStroke("ctrl C"), "copyPath");
         table.getActionMap().put("copyPath", new AbstractAction() {
-                    @Override
-                    public void actionPerformed(ActionEvent e) {
-                        int row = table.getSelectedRow();
-                        if (row >= 0) {
-                            int modelRow = table.convertRowIndexToModel(row);
-                            String pathValue = tableModel.getValueAt(modelRow, 2).toString();
-                            StringSelection selection = new StringSelection(pathValue);
-                            Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, selection);
-                        }
-                    }
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                int row = table.getSelectedRow();
+                if (row >= 0) {
+                    int modelRow = table.convertRowIndexToModel(row);
+                    String pathValue = tableModel.getValueAt(modelRow, 2).toString();
+                    StringSelection selection = new StringSelection(pathValue);
+                    Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, selection);
+                }
+            }
         });
 
 
