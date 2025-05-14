@@ -13,6 +13,8 @@ import javax.swing.table.DefaultTableModel;
 import javax.swing.table.TableRowSorter;
 import javax.swing.RowFilter;
 import java.awt.*;
+import java.awt.datatransfer.StringSelection;
+import java.awt.event.ActionEvent;
 import java.io.*;
 import java.nio.file.Files;
 import java.util.List;
@@ -163,6 +165,22 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 return checkBox;
             }
         });
+
+        // Copy path
+        table.getInputMap().put(KeyStroke.getKeyStroke("ctrl C"), "copyPath");
+        table.getActionMap().put("copyPath", new AbstractAction() {
+                    @Override
+                    public void actionPerformed(ActionEvent e) {
+                        int row = table.getSelectedRow();
+                        if (row >= 0) {
+                            int modelRow = table.convertRowIndexToModel(row);
+                            String pathValue = tableModel.getValueAt(modelRow, 2).toString();
+                            StringSelection selection = new StringSelection(pathValue);
+                            Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, selection);
+                        }
+                    }
+        });
+
 
         table.setDefaultRenderer(String.class, new DefaultTableCellRenderer() {
             @Override
