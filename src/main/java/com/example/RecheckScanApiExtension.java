@@ -1,21 +1,21 @@
 package com.example;
 
-import com.example.SettingsPanel;
+
 import burp.api.montoya.*;
+import burp.api.montoya.core.HighlightColor;
 import burp.api.montoya.core.ToolType;
 import burp.api.montoya.extension.ExtensionUnloadingHandler;
 import burp.api.montoya.http.handler.*;
 import burp.api.montoya.http.message.requests.HttpRequest;
 
 import javax.swing.*;
-import javax.swing.table.DefaultTableCellRenderer;
-import javax.swing.table.DefaultTableModel;
-import javax.swing.table.TableRowSorter;
+import javax.swing.table.*;
 import javax.swing.RowFilter;
 import java.awt.*;
 import java.awt.datatransfer.StringSelection;
 import java.awt.event.ActionEvent;
 import java.io.*;
+import java.lang.reflect.InvocationTargetException;
 import java.nio.file.Files;
 import java.util.List;
 import java.util.Set;
@@ -32,6 +32,8 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     private DefaultTableModel tableModel;
     private final Set<String> loggedRequests = new HashSet<>();
     private final Map<String, Set<String>> pathToParams = new HashMap<>();
+    private boolean highlightEnabled = false;
+    private boolean noteEnabled = false;
 
     @Override
     public void initialize(MontoyaApi api) {
@@ -51,7 +53,6 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             public ResponseReceivedAction handleHttpResponseReceived(HttpResponseReceived response) {
                 HttpRequest request = response.initiatingRequest();
                 String method = request.method();
-
                 if (method.equals("OPTIONS")) return ResponseReceivedAction.continueWith(response);
                 ToolType sourceType = response.toolSource().toolType();
                 if (sourceType == ToolType.EXTENSIONS) return ResponseReceivedAction.continueWith(response);
@@ -92,53 +93,65 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                     knownParams.addAll(newParams);
                     pathToParams.put(uniqueKey, knownParams);
 
-                    String savedNote = String.join("|", knownParams);
                     String displayNote = String.join(", ", knownParams);
                     if (!addedParams.isEmpty()) {
                         displayNote += " [new: " + String.join(", ", addedParams) + "]";
                     }
 
                     final String finalDisplayNote = displayNote;
-                    final String finalSavedNote = savedNote;
 
-                    SwingUtilities.invokeLater(() -> {
-                        Boolean scanned = isScanner;
-                        Boolean rejected = false;
-                        boolean found = false;
-                        for (int i = 0; i < tableModel.getRowCount(); i++) {
-                            String existingHost = tableModel.getValueAt(i, 1).toString();
-                            String existingPath = tableModel.getValueAt(i, 2).toString();
-                            if (host.equals(existingHost) && path.equals(existingPath)) {
-                                scanned = scanned || Boolean.TRUE.equals(tableModel.getValueAt(i, 4));
-                                rejected = Boolean.TRUE.equals(tableModel.getValueAt(i, 5));
-                                tableModel.setValueAt(finalDisplayNote, i, 3);
-                                tableModel.setValueAt(scanned, i, 4);
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (!found) {
-                            Object[] newRow = new Object[]{method, host, path, finalDisplayNote, scanned, rejected};
-                            int insertIndex = 0;
+                    final boolean[] hehe = new boolean[1];
+
+                    try {
+                        SwingUtilities.invokeAndWait(() -> {
+                            Boolean scanned = isScanner;
+                            Boolean rejected = false;
+                            boolean found = false;
                             for (int i = 0; i < tableModel.getRowCount(); i++) {
-                                boolean rowScanned = Boolean.TRUE.equals(tableModel.getValueAt(i, 4));
-                                boolean rowRejected = Boolean.TRUE.equals(tableModel.getValueAt(i, 5));
-                                if (rowScanned || rowRejected) {
-                                    continue;
+                                String existingHost = tableModel.getValueAt(i, 1).toString();
+                                String existingPath = tableModel.getValueAt(i, 2).toString();
+                                if (host.equals(existingHost) && path.equals(existingPath)) {
+                                    scanned = scanned || Boolean.TRUE.equals(tableModel.getValueAt(i, 4));
+                                    rejected = Boolean.TRUE.equals(tableModel.getValueAt(i, 5));
+                                    tableModel.setValueAt(finalDisplayNote, i, 3);
+                                    tableModel.setValueAt(scanned, i, 4);
+                                    found = true;
+                                    hehe[0] = scanned;
+                                    break;
                                 }
-                                insertIndex = i;
-                                break;
                             }
-                            tableModel.insertRow(insertIndex, newRow);
-                        }
-                        loggedRequests.add(uniqueKey);
-                        saveTableData();
-                    });
+                            if (!found) {
+                                Object[] newRow = new Object[]{method, host, path, finalDisplayNote, scanned, rejected};
+                                int insertIndex = 0;
+                                for (int i = 0; i < tableModel.getRowCount(); i++) {
+                                    boolean rowScanned = Boolean.TRUE.equals(tableModel.getValueAt(i, 4));
+                                    boolean rowRejected = Boolean.TRUE.equals(tableModel.getValueAt(i, 5));
+                                    if (rowScanned || rowRejected) {
+                                        continue;
+                                    }
+                                    insertIndex = i;
+                                    break;
+                                }
+                                tableModel.insertRow(insertIndex, newRow);
+                            }
+
+                            loggedRequests.add(uniqueKey);
+                            saveTableData();
+                        });
+                    } catch (InterruptedException | InvocationTargetException e) {
+                        throw new RuntimeException(e);
+                    }
+
+                    if (hehe[0]) {
+                        if (highlightEnabled) response.annotations().setHighlightColor(HighlightColor.YELLOW);
+                        if (noteEnabled) response.annotations().setNotes("Scanned");
+                    }
                 }
                 return ResponseReceivedAction.continueWith(response);
             }
         });
     }
+
 
     private void createUI() {
         tableModel = new DefaultTableModel(new Object[]{"Method", "Host", "Path", "Note", "Scanned", "Rejected"}, 0) {
@@ -171,13 +184,28 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         table.getActionMap().put("copyPath", new AbstractAction() {
             @Override
             public void actionPerformed(ActionEvent e) {
-                int row = table.getSelectedRow();
-                if (row >= 0) {
-                    int modelRow = table.convertRowIndexToModel(row);
-                    String pathValue = tableModel.getValueAt(modelRow, 2).toString();
-                    StringSelection selection = new StringSelection(pathValue);
-                    Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, selection);
+//                int row = table.getSelectedRows();
+//                if (row >= 0) {
+//                    int modelRow = table.convertRowIndexToModel(row);
+//                    String pathValue = tableModel.getValueAt(modelRow, 2).toString();
+//                    StringSelection selection = new StringSelection(pathValue);
+//                    Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, selection);
+//                }
+                int[] selectedRows = table.getSelectedRows();
+                if (selectedRows.length > 0) {
+                    StringBuilder sb = new StringBuilder();
+                    for (int viewRow : selectedRows) {
+                        int modelRow = table.convertRowIndexToModel(viewRow);
+                        Object value = tableModel.getValueAt(modelRow, 2); // cột path
+                        if (value != null) {
+                            sb.append(value.toString()).append("\n");
+                        }
+                    }
+
+                    StringSelection selection = new StringSelection(sb.toString().trim());
+                    Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, null);
                 }
+
             }
         });
 
@@ -269,6 +297,23 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             }
         });
 
+        table.getTableHeader().addMouseMotionListener(new java.awt.event.MouseMotionAdapter() {
+            @Override
+            public void mouseDragged(java.awt.event.MouseEvent e) {
+                JTableHeader header = (JTableHeader) e.getSource();
+                TableColumnModel columnModel = header.getColumnModel();
+                int draggedColumnIndex = header.columnAtPoint(e.getPoint());
+
+                // Số cột trong bảng
+                int totalColumns = columnModel.getColumnCount();
+
+                // Không cho reorder 3 cột cuối
+                if (draggedColumnIndex >= totalColumns - 3) {
+                    header.setDraggedColumn(null); // hủy thao tác kéo
+                }
+            }
+        });
+
         JTabbedPane tabs = new JTabbedPane();
         tabs.addTab("Logs", logPanel);
 
@@ -282,7 +327,55 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             }
         });
 
+        // highlight\
+        JButton highlightButton = new JButton();
+        highlightButton.setText("Highlight: " + (highlightEnabled ? "ON" : "OFF"));
+        highlightButton.setBackground(highlightEnabled ? Color.GREEN : Color.RED);
+        highlightButton.setForeground(Color.BLACK);
+        highlightButton.addActionListener(e -> {
+            highlightEnabled = !highlightEnabled;
+            highlightButton.setText("Highlight: " + (highlightEnabled ? "ON" : "OFF"));
+            highlightButton.setBackground(highlightEnabled ? Color.GREEN : Color.RED);
+//            highlightButton.setForeground(Color.BLACK);
+            savedExtensions = extensionArea.getText().trim();
+            savedOutputPath = outputPathField.getText().trim();
+            try {
+                File configFile = new File(System.getProperty("user.home"), "AppData/Local/RecheckScan/scan_api.txt");
+                if (!configFile.getParentFile().exists()) configFile.getParentFile().mkdirs();
+                try (BufferedWriter writer = new BufferedWriter(new FileWriter(configFile))) {
+                    writer.write(savedExtensions + "\n" + highlightEnabled + "\n" + noteEnabled + "\n" + savedOutputPath);
+                }
+            } catch (IOException ex) {
+                JOptionPane.showMessageDialog(null, "Failed to save settings: " + ex.getMessage());
+            }
+        });
+
+
+        JButton noteButton = new JButton();
+        noteButton.setText("Note: " + (noteEnabled ? "ON" : "OFF"));
+        noteButton.setBackground(noteEnabled ? Color.GREEN : Color.RED);
+        noteButton.setForeground(Color.BLACK);
+        noteButton.addActionListener(e -> {
+            noteEnabled = !noteEnabled;
+            noteButton.setText("Note: " + (noteEnabled ? "ON" : "OFF"));
+            noteButton.setBackground(noteEnabled ? Color.GREEN : Color.RED);
+            savedExtensions = extensionArea.getText().trim();
+            savedOutputPath = outputPathField.getText().trim();
+            try {
+                File configFile = new File(System.getProperty("user.home"), "AppData/Local/RecheckScan/scan_api.txt");
+                if (!configFile.getParentFile().exists()) configFile.getParentFile().mkdirs();
+                try (BufferedWriter writer = new BufferedWriter(new FileWriter(configFile))) {
+                    writer.write(savedExtensions + "\n" + highlightEnabled + "\n" + noteEnabled + "\n" + savedOutputPath);
+                }
+            } catch (IOException ex) {
+                JOptionPane.showMessageDialog(null, "Failed to save settings: " + ex.getMessage());
+            }
+        });
+
+
+
         JButton applyButton = new JButton("Apply");
+
         applyButton.addActionListener(e -> {
             savedExtensions = extensionArea.getText().trim();
             savedOutputPath = outputPathField.getText().trim();
@@ -290,7 +383,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 File configFile = new File(System.getProperty("user.home"), "AppData/Local/RecheckScan/scan_api.txt");
                 if (!configFile.getParentFile().exists()) configFile.getParentFile().mkdirs();
                 try (BufferedWriter writer = new BufferedWriter(new FileWriter(configFile))) {
-                    writer.write(savedExtensions + "\n" + savedOutputPath);
+                    writer.write(savedExtensions + "\n" + highlightEnabled + "\n" + noteEnabled + "\n" + savedOutputPath);
                 }
             } catch (IOException ex) {
                 JOptionPane.showMessageDialog(null, "Failed to save settings: " + ex.getMessage());
@@ -301,7 +394,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             JOptionPane.showMessageDialog(null, "Settings saved and project loaded.");
         });
 
-        tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, applyButton));
+        tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightButton, noteButton, applyButton));
 
         JPanel mainPanel = new JPanel(new BorderLayout());
         mainPanel.add(tabs, BorderLayout.CENTER);
@@ -334,7 +427,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 List<String> lines = Files.readAllLines(configFile.toPath());
                 if (lines.size() >= 2) {
                     savedExtensions = lines.get(0).trim();
-                    savedOutputPath = lines.get(1).trim();
+                    highlightEnabled = Boolean.parseBoolean(lines.get(2).trim());
+                    noteEnabled = Boolean.parseBoolean(lines.get(2).trim());
+                    savedOutputPath = lines.get(3).trim();
                 }
             }
         } catch (IOException e) {
