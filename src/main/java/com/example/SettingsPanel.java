@@ -3,8 +3,8 @@ package com.example;
 import javax.swing.*;
 import java.awt.*;
 
-public class SettingsPanel {
-    public static JPanel create(JTextArea extensionArea, JTextField outputPathField, JButton browseButton, JButton applyButton) {
+class SettingsPanel {
+    public static JPanel create(JTextArea extensionArea, JTextField outputPathField, JButton browseButton, JButton highlightButton, JButton noteButton, JButton applyButton) {
         JPanel settingsPanel = new JPanel();
         settingsPanel.setLayout(new BoxLayout(settingsPanel, BoxLayout.Y_AXIS));
         settingsPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
@@ -22,17 +22,27 @@ public class SettingsPanel {
         outputPathPanel.add(outputPathField);
         outputPathPanel.add(browseButton);
 
-        // Apply button panel
-        applyButton.setPreferredSize(new Dimension(100, 32));
+        // Toggle Buttons side-by-side
+        JPanel togglePanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        highlightButton.setPreferredSize(new Dimension(140, 32));
+        noteButton.setPreferredSize(new Dimension(140, 32));
+        highlightButton.setFont(highlightButton.getFont().deriveFont(Font.BOLD, 13f));
+        noteButton.setFont(noteButton.getFont().deriveFont(Font.BOLD, 13f));
+        togglePanel.add(highlightButton);
+        togglePanel.add(noteButton);
+
+        // Apply panel
+        applyButton.setPreferredSize(new Dimension(150, 32));
         applyButton.setFont(applyButton.getFont().deriveFont(Font.BOLD, 13f));
         JPanel applyPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         applyPanel.add(applyButton);
 
-        // Add to main panel
+        // Add components
         settingsPanel.add(extScroll);
         settingsPanel.add(Box.createRigidArea(new Dimension(0, 8)));
         settingsPanel.add(outputPathPanel);
         settingsPanel.add(Box.createRigidArea(new Dimension(0, 8)));
+        settingsPanel.add(togglePanel);
         settingsPanel.add(applyPanel);
 
         return settingsPanel;
