@@ -427,7 +427,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 List<String> lines = Files.readAllLines(configFile.toPath());
                 if (lines.size() >= 2) {
                     savedExtensions = lines.get(0).trim();
-                    highlightEnabled = Boolean.parseBoolean(lines.get(2).trim());
+                    highlightEnabled = Boolean.parseBoolean(lines.get(1).trim());
                     noteEnabled = Boolean.parseBoolean(lines.get(2).trim());
                     savedOutputPath = lines.get(3).trim();
                 }
