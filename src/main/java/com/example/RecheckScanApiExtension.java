@@ -35,6 +35,11 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     private boolean highlightEnabled = false;
     private boolean noteEnabled = false;
 
+    private final JLabel totalLbl    = new JLabel("Total: 0");
+    private final JLabel scannedLbl  = new JLabel("Scanned: 0");
+    private final JLabel rejectedLbl = new JLabel("Rejected: 0");
+    private final JLabel bypassLbl   = new JLabel("Bypass: 0");
+
     @Override
     public void initialize(MontoyaApi api) {
         this.api = api;
@@ -70,6 +75,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                             if (host.equals(existingHost) && path.equals(existingPath)) {
                                 tableModel.setValueAt(true, i, 4);
                                 saveTableData();
+                                updateStats();
                                 break;
                             }
                         }
@@ -137,6 +143,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
                             loggedRequests.add(uniqueKey);
                             saveTableData();
+                            updateStats();
                         });
                     } catch (InterruptedException | InvocationTargetException e) {
                         throw new RuntimeException(e);
@@ -154,14 +161,14 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
 
     private void createUI() {
-        tableModel = new DefaultTableModel(new Object[]{"Method", "Host", "Path", "Note", "Scanned", "Rejected"}, 0) {
+        tableModel = new DefaultTableModel(new Object[]{"Method", "Host", "Path", "Note", "Scanned", "Rejected", "Bypass"}, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
-                return column == 2 || column == 5;
+                return column == 2 || column == 5 || column == 6;
             }
             @Override
             public Class<?> getColumnClass(int columnIndex) {
-                return (columnIndex == 4 || columnIndex == 5) ? Boolean.class : String.class;
+                return (columnIndex == 4 || columnIndex == 5 || columnIndex == 6) ? Boolean.class : String.class;
             }
         };
 
@@ -259,8 +266,8 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         btnLong.addActionListener(e -> {
             List<Object[]> rows = getTableData();
             rows.sort((a, b) -> {
-                boolean aHandled = Boolean.TRUE.equals(a[4]) || Boolean.TRUE.equals(a[5]);
-                boolean bHandled = Boolean.TRUE.equals(b[4]) || Boolean.TRUE.equals(b[5]);
+                boolean aHandled = Boolean.TRUE.equals(a[4]) || Boolean.TRUE.equals(a[5]) || Boolean.TRUE.equals(a[6]);
+                boolean bHandled = Boolean.TRUE.equals(b[4]) || Boolean.TRUE.equals(b[5]) || Boolean.TRUE.equals(b[6]);
                 return Boolean.compare(!aHandled, !bHandled);
             });
             reloadTable(rows);
@@ -269,8 +276,8 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         btnShort.addActionListener(e -> {
             List<Object[]> rows = getTableData();
             rows.sort((a, b) -> {
-                boolean aHandled = Boolean.TRUE.equals(a[4]) || Boolean.TRUE.equals(a[5]);
-                boolean bHandled = Boolean.TRUE.equals(b[4]) || Boolean.TRUE.equals(b[5]);
+                boolean aHandled = Boolean.TRUE.equals(a[4]) || Boolean.TRUE.equals(a[5]) || Boolean.TRUE.equals(a[6]);
+                boolean bHandled = Boolean.TRUE.equals(b[4]) || Boolean.TRUE.equals(b[5]) || Boolean.TRUE.equals(b[6]);
                 return Boolean.compare(aHandled, bHandled);
             });
             reloadTable(rows);
@@ -281,19 +288,34 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             loggedRequests.clear();
             pathToParams.clear();
             loadLogData();
+            updateStats();
         });
 
         loadLogData();
+        updateStats();
 
+        // xử lý phần check
         table.getModel().addTableModelListener(e -> {
             int row = e.getFirstRow();
             int col = e.getColumn();
-            if (col == 4 || col == 5) {
+            if (col == 4 || col == 5 || col == 6) {
                 Boolean scanned = (Boolean) table.getValueAt(row, 4);
                 Boolean rejected = (Boolean) table.getValueAt(row, 5);
-                if (col == 4 && Boolean.TRUE.equals(scanned)) table.setValueAt(false, row, 5);
-                else if (col == 5 && Boolean.TRUE.equals(rejected)) table.setValueAt(false, row, 4);
+                Boolean bypass = (Boolean) table.getValueAt(row, 6);
+                if (col == 4 && Boolean.TRUE.equals(scanned)) {
+                    table.setValueAt(false, row, 5);
+                    table.setValueAt(false, row, 6);
+                } else {
+                    if (col == 5 && Boolean.TRUE.equals(rejected)) {
+                        table.setValueAt(false, row, 4);
+                        table.setValueAt(false, row, 6);
+                    } else if (col == 6 && Boolean.TRUE.equals(bypass)) {
+                        table.setValueAt(false, row, 4);
+                        table.setValueAt(false, row, 5);
+                    }
+                }
                 saveTableData();
+                updateStats();
             }
         });
 
@@ -308,7 +330,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 int totalColumns = columnModel.getColumnCount();
 
                 // Không cho reorder 3 cột cuối
-                if (draggedColumnIndex >= totalColumns - 3) {
+                if (draggedColumnIndex >= totalColumns - 4) {
                     header.setDraggedColumn(null); // hủy thao tác kéo
                 }
             }
@@ -327,7 +349,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             }
         });
 
-        // highlight\
+        // highlight
         JButton highlightButton = new JButton();
         highlightButton.setText("Highlight: " + (highlightEnabled ? "ON" : "OFF"));
         highlightButton.setBackground(highlightEnabled ? Color.GREEN : Color.RED);
@@ -394,11 +416,12 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             JOptionPane.showMessageDialog(null, "Settings saved and project loaded.");
         });
 
-        tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightButton, noteButton, applyButton));
+        tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightButton, noteButton, applyButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl));
 
         JPanel mainPanel = new JPanel(new BorderLayout());
         mainPanel.add(tabs, BorderLayout.CENTER);
         api.userInterface().registerSuiteTab("Recheck Scan", mainPanel);
+        updateStats();
     }
 
     private List<Object[]> getTableData() {
@@ -443,12 +466,13 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             try {
                 List<String> lines = Files.readAllLines(logFile.toPath());
                 for (String line : lines) {
-                    String[] parts = line.split(",", 6);
-                    if (parts.length == 6) {
+                    String[] parts = line.split(",", 7);
+                    if (parts.length == 7) {
                         String formattedNote = parts[3].replace("|", ", ");
                         tableModel.insertRow(0, new Object[]{
                                 parts[0], parts[1], parts[2], formattedNote,
-                                Boolean.parseBoolean(parts[4]), Boolean.parseBoolean(parts[5])});
+                                Boolean.parseBoolean(parts[4]), Boolean.parseBoolean(parts[5]), Boolean.parseBoolean(parts[6])
+                        });
                         loggedRequests.add(parts[1] + "|" + parts[2]);
                         pathToParams.put(parts[1] + "|" + parts[2], new HashSet<>(Arrays.asList(parts[3].split("\\|"))));
                     }
@@ -481,12 +505,28 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                         tableModel.getValueAt(i, 2).toString(),
                         joinedNote,
                         String.valueOf(tableModel.getValueAt(i, 4)),
-                        String.valueOf(tableModel.getValueAt(i, 5))));
+                        String.valueOf(tableModel.getValueAt(i, 5)),
+                        String.valueOf(tableModel.getValueAt(i, 6))));
                 writer.newLine();
             }
         } catch (IOException e) {
             api.logging().logToError("Failed to save log: " + e.getMessage());
         }
+    }
+
+
+    private void updateStats(){
+        int total = tableModel.getRowCount();
+        int scanned=0, rejected=0, bypass=0;
+        for(int i=0;i<total;i++){
+            if(Boolean.TRUE.equals(tableModel.getValueAt(i,4))) scanned++;
+            if(Boolean.TRUE.equals(tableModel.getValueAt(i,5))) rejected++;
+            if(Boolean.TRUE.equals(tableModel.getValueAt(i,6))) bypass++;
+        }
+        totalLbl.setText("Total: "+total);
+        scannedLbl.setText("Scanned: "+scanned);
+        rejectedLbl.setText("Rejected: "+rejected);
+        bypassLbl.setText("Bypass: "+bypass);
     }
 
     @Override
