@@ -1,6 +1,7 @@
 package com.example;
 
 import javax.swing.*;
+import javax.swing.border.Border;
 import javax.swing.border.TitledBorder;
 import java.awt.*;
 
@@ -10,8 +11,9 @@ public class SettingsPanel {
             JTextArea  extensionArea,
             JTextField outputPathField,
             JButton    browseButton,
-            JButton    highlightButton,
-            JButton    noteButton,
+            JCheckBox  highlightCheckBox, // FIXED: Changed from JButton
+            JCheckBox  noteCheckBox,      // FIXED: Changed from JButton
+            JCheckBox  autoBypassCheckBox,
             JButton    applyButton,
             JLabel     totalLbl,
             JLabel     scannedLbl,
@@ -19,86 +21,92 @@ public class SettingsPanel {
             JLabel     bypassLbl,
             JLabel     unverifiedLbl) {
 
-        /* ========= ROOT ========= */
+        /* ========= ROOT PANEL ========= */
         JPanel settingsPanel = new JPanel();
-        settingsPanel.setLayout(new BoxLayout(settingsPanel, BoxLayout.Y_AXIS));
-        settingsPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        settingsPanel.setLayout(new BorderLayout(10, 10));
+        settingsPanel.setBorder(BorderFactory.createEmptyBorder(15, 15, 15, 15));
 
-        /* ========= “Excluded Extensions” ========= */
-        extensionArea.setRows(2);
+        /* ========= CENTER PANEL (MAIN CONTROLS) ========= */
+        JPanel centerPanel = new JPanel();
+        centerPanel.setLayout(new BoxLayout(centerPanel, BoxLayout.Y_AXIS));
+
+        // --- Project Settings Group ---
+        JPanel projectSettingsPanel = new JPanel();
+        projectSettingsPanel.setLayout(new BoxLayout(projectSettingsPanel, BoxLayout.Y_AXIS));
+        projectSettingsPanel.setBorder(createTitledBorder("Project Settings"));
+        
+        JPanel outputPathPanel = new JPanel(new BorderLayout(5,0));
+        outputPathPanel.add(new JLabel("Log Output Path: "), BorderLayout.WEST);
+        outputPathPanel.add(outputPathField, BorderLayout.CENTER);
+        outputPathPanel.add(browseButton, BorderLayout.EAST);
+        outputPathPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, outputPathField.getPreferredSize().height));
+        outputPathPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        projectSettingsPanel.add(outputPathPanel);
+        projectSettingsPanel.add(Box.createRigidArea(new Dimension(0, 5)));
+
+        extensionArea.setRows(1);
         JScrollPane extScroll = new JScrollPane(extensionArea);
-        extScroll.setBorder(
-                BorderFactory.createTitledBorder("Excluded Extensions (comma-separated)"));
+        extScroll.setMaximumSize(new Dimension(Integer.MAX_VALUE, extScroll.getPreferredSize().height + 10));
+        extScroll.setAlignmentX(Component.LEFT_ALIGNMENT);
+        
+        projectSettingsPanel.add(extScroll);
+        
+        centerPanel.add(projectSettingsPanel);
+        centerPanel.add(Box.createRigidArea(new Dimension(0, 10)));
 
-        /* ========= Log output path ========= */
-        JPanel outputPathPanel = new JPanel(new FlowLayout(FlowLayout.LEADING, 5, 5));
-        outputPathField.setPreferredSize(new Dimension(200, 24));
-        outputPathPanel.add(new JLabel("Log Output Path: "));
-        outputPathPanel.add(outputPathField);
-        outputPathPanel.add(browseButton);
+        // --- Controls Group ---
+        JPanel controlsPanel = new JPanel();
+        controlsPanel.setLayout(new BoxLayout(controlsPanel, BoxLayout.Y_AXIS));
+        controlsPanel.setBorder(createTitledBorder("Controls"));
 
-        /* ========= Toggle buttons (trái) ========= */
-        Dimension btnSize = new Dimension(140, 32);
-        for (JButton b : new JButton[]{highlightButton, noteButton}) {
-            b.setPreferredSize(btnSize);
-            b.setMinimumSize(btnSize);
-            b.setMaximumSize(btnSize);                 // khoá width
-            b.setFont(b.getFont().deriveFont(Font.BOLD, 13f));
-        }
-        JPanel togglePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 5));
-        togglePanel.add(highlightButton);
-        togglePanel.add(noteButton);
+        // FIXED: Add checkboxes directly to the panel
+        controlsPanel.add(highlightCheckBox);
+        controlsPanel.add(noteCheckBox);
+        controlsPanel.add(autoBypassCheckBox);
+        
+        centerPanel.add(controlsPanel);
 
-
+        /* ========= EAST PANEL (STATISTICS) ========= */
+        JPanel eastPanel = new JPanel(new BorderLayout());
+        
         JPanel statsPanel = new JPanel();
-
-        TitledBorder statsBorder = BorderFactory.createTitledBorder("Statistics");
-        Font baseFont = statsBorder.getTitleFont();                   // font mặc định
-        if (baseFont == null) baseFont = statsPanel.getFont();        // fallback
-        statsBorder.setTitleFont(baseFont.deriveFont(Font.BOLD));     // in đậm
-        statsPanel.setBorder(statsBorder);
-        statsPanel.setLayout(new GridLayout(5, 1, 0, 6)); // 4 hàng – 1 cột, cách dòng 6 px
+        statsPanel.setBorder(createTitledBorder("Statistics"));
+        statsPanel.setLayout(new GridLayout(5, 1, 0, 10));
+        statsPanel.setPreferredSize(new Dimension(220, 200));
 
         Font statFont = totalLbl.getFont().deriveFont(Font.PLAIN, 15f);
         for (JLabel lbl : new JLabel[]{totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl}) {
             lbl.setFont(statFont);
-            lbl.setHorizontalAlignment(SwingConstants.LEFT); // bám lề trái
-            statsPanel.add(lbl);                             // add theo thứ tự → thẳng hàng
+            lbl.setBorder(BorderFactory.createEmptyBorder(0, 10, 0, 0));
+            statsPanel.add(lbl);
         }
-        // kích thước cố định để không tràn full màn hình
-        int statsW = 300, statsH = 170;
-        statsPanel.setPreferredSize(new Dimension(statsW, statsH));
-        statsPanel.setMinimumSize  (new Dimension(statsW, statsH));
-        statsPanel.setMaximumSize  (new Dimension(statsW, statsH));
+        
+        eastPanel.add(statsPanel, BorderLayout.NORTH);
 
-        /* ========= Middle panel =========
-           | Toggle |  (glue)  |  Statistics | (glue) |
-           => Statistics nằm giữa
-        */
-        JPanel middlePanel = new JPanel();
-        middlePanel.setLayout(new BoxLayout(middlePanel, BoxLayout.X_AXIS));
-        middlePanel.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        middlePanel.add(togglePanel);
-        middlePanel.add(Box.createHorizontalGlue());   // lò xo trái
-        middlePanel.add(statsPanel);
-        middlePanel.add(Box.createHorizontalGlue());   // lò xo phải
-
-        /* ========= Apply button ========= */
+        /* ========= SOUTH PANEL (APPLY BUTTON) ========= */
+        JPanel southPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         applyButton.setPreferredSize(new Dimension(150, 32));
         applyButton.setFont(applyButton.getFont().deriveFont(Font.BOLD, 13f));
-        JPanel applyPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        applyPanel.add(applyButton);
-
-        /* ========= Assemble ========= */
-        settingsPanel.add(extScroll);
-        settingsPanel.add(Box.createRigidArea(new Dimension(0, 8)));
-        settingsPanel.add(outputPathPanel);
-        settingsPanel.add(Box.createRigidArea(new Dimension(0, 8)));
-        settingsPanel.add(middlePanel);
-        settingsPanel.add(Box.createRigidArea(new Dimension(0, 8)));
-        settingsPanel.add(applyPanel);
+        southPanel.add(applyButton);
+        
+        /* ========= ASSEMBLE PANELS ========= */
+        settingsPanel.add(centerPanel, BorderLayout.CENTER);
+        settingsPanel.add(eastPanel, BorderLayout.EAST);
+        settingsPanel.add(southPanel, BorderLayout.SOUTH);
 
         return settingsPanel;
+    }
+
+    private static Border createTitledBorder(String title) {
+        TitledBorder border = BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), title
+        );
+        border.setTitleFont(border.getTitleFont().deriveFont(Font.BOLD, 13f));
+        return BorderFactory.createCompoundBorder(
+                BorderFactory.createEmptyBorder(5, 0, 5, 0),
+                border
+        );
     }
 }
