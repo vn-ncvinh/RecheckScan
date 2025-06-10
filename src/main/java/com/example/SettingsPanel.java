@@ -16,7 +16,8 @@ public class SettingsPanel {
             JLabel     totalLbl,
             JLabel     scannedLbl,
             JLabel     rejectedLbl,
-            JLabel     bypassLbl) {
+            JLabel     bypassLbl,
+            JLabel     unverifiedLbl) {
 
         /* ========= ROOT ========= */
         JPanel settingsPanel = new JPanel();
@@ -56,16 +57,16 @@ public class SettingsPanel {
         if (baseFont == null) baseFont = statsPanel.getFont();        // fallback
         statsBorder.setTitleFont(baseFont.deriveFont(Font.BOLD));     // in đậm
         statsPanel.setBorder(statsBorder);
-        statsPanel.setLayout(new GridLayout(4, 1, 0, 6)); // 4 hàng – 1 cột, cách dòng 6 px
+        statsPanel.setLayout(new GridLayout(5, 1, 0, 6)); // 4 hàng – 1 cột, cách dòng 6 px
 
         Font statFont = totalLbl.getFont().deriveFont(Font.PLAIN, 15f);
-        for (JLabel lbl : new JLabel[]{totalLbl, scannedLbl, rejectedLbl, bypassLbl}) {
+        for (JLabel lbl : new JLabel[]{totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl}) {
             lbl.setFont(statFont);
             lbl.setHorizontalAlignment(SwingConstants.LEFT); // bám lề trái
             statsPanel.add(lbl);                             // add theo thứ tự → thẳng hàng
         }
         // kích thước cố định để không tràn full màn hình
-        int statsW = 300, statsH = 150;
+        int statsW = 300, statsH = 170;
         statsPanel.setPreferredSize(new Dimension(statsW, statsH));
         statsPanel.setMinimumSize  (new Dimension(statsW, statsH));
         statsPanel.setMaximumSize  (new Dimension(statsW, statsH));
