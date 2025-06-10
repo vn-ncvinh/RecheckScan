@@ -39,6 +39,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     private final JLabel scannedLbl  = new JLabel("Scanned: 0");
     private final JLabel rejectedLbl = new JLabel("Rejected: 0");
     private final JLabel bypassLbl   = new JLabel("Bypass: 0");
+    private final JLabel unverifiedLbl   = new JLabel("Unverified: 0");
 
     @Override
     public void initialize(MontoyaApi api) {
@@ -416,7 +417,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             JOptionPane.showMessageDialog(null, "Settings saved and project loaded.");
         });
 
-        tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightButton, noteButton, applyButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl));
+        tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightButton, noteButton, applyButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl));
 
         JPanel mainPanel = new JPanel(new BorderLayout());
         mainPanel.add(tabs, BorderLayout.CENTER);
@@ -481,6 +482,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 api.logging().logToError("Failed to load log: " + e.getMessage());
             }
         }
+        updateStats();
     }
 
     private File getLogFile() {
@@ -527,6 +529,8 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         scannedLbl.setText("Scanned: "+scanned);
         rejectedLbl.setText("Rejected: "+rejected);
         bypassLbl.setText("Bypass: "+bypass);
+        int unverified = total - scanned - rejected - bypass;
+        unverifiedLbl.setText("Unverified: "+ unverified);
     }
 
     @Override
