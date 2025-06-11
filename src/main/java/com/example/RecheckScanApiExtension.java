@@ -12,6 +12,7 @@ import javax.swing.*;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import javax.swing.event.TableModelEvent;
+import javax.swing.event.TableModelListener;
 import javax.swing.table.*;
 import javax.swing.RowFilter;
 import java.awt.*;
@@ -180,13 +181,14 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 return (columnIndex >= 4 && columnIndex <= 6) ? Boolean.class : String.class;
             }
         };
-        
-        tableModel.addTableModelListener(e -> {
+
+        TableModelListener tableListener = e -> {
             if (e.getType() == TableModelEvent.UPDATE || e.getType() == TableModelEvent.INSERT || e.getType() == TableModelEvent.DELETE) {
                 saveTableData();
                 updateStats();
             }
-        });
+        };
+        tableModel.addTableModelListener(tableListener);
 
         JTabbedPane tabs = new JTabbedPane();
 
@@ -239,7 +241,6 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             }
         });
 
-        // FIXED: Changed from JButton to JCheckBox
         JCheckBox highlightCheckBox = new JCheckBox("Highlight scanned requests in Proxy history");
         highlightCheckBox.setSelected(highlightEnabled);
         highlightCheckBox.addActionListener(e -> {
@@ -263,16 +264,25 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
         JButton applyButton = new JButton("Apply");
         applyButton.addActionListener(e -> {
+            // Save current settings from the text fields
             savedExtensions = extensionArea.getText().trim();
             savedOutputPath = outputPathField.getText().trim();
             saveSettings();
+
+            // FIXED: Temporarily remove the listener to prevent saving an empty table
+            tableModel.removeTableModelListener(tableListener);
+
+            // Safely clear and reload the table
             tableModel.setRowCount(0);
             loggedRequests.clear();
-            loadLogData();
+            loadLogData(); // Reloads from the (potentially new) log file path
+
+            // Re-add the listener for future operations
+            tableModel.addTableModelListener(tableListener);
+
             JOptionPane.showMessageDialog(null, "Settings saved and project loaded.");
         });
 
-        // Pass new JCheckBox components to the SettingsPanel
         tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightCheckBox, noteCheckBox, autoBypassCheckBox, applyButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl));
 
         JPanel mainPanel = new JPanel(new BorderLayout());
@@ -399,7 +409,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         File logFile = getLogFile();
         if (logFile.exists()) {
             try {
-                tableModel.setRowCount(0);
+                // This method is now safe to be called when the listener is detached
                 List<String> lines = Files.readAllLines(logFile.toPath());
                 List<Object[]> newRows = new ArrayList<>();
                 for (String line : lines) {
