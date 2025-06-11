@@ -30,41 +30,64 @@ import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.stream.Collectors;
 
+/**
+ * Lớp chính của extension, triển khai BurpExtension để tích hợp với Burp Suite.
+ */
 public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadingHandler {
+    // API chính của Montoya để tương tác với Burp Suite
     private MontoyaApi api;
+
+    // Các biến lưu trữ cài đặt của người dùng
     private String savedExtensions;
     private String savedOutputPath;
-    private DefaultTableModel tableModel;
-    private final Set<String> loggedRequests = new HashSet<>();
-    private final Map<String, Set<String>> pathToParams = new HashMap<>();
     private boolean highlightEnabled = false;
     private boolean noteEnabled = false;
     private boolean autoBypassNoParamGet = false;
 
+    // Model cho các bảng dữ liệu, chứa tất cả thông tin API
+    private DefaultTableModel tableModel;
+
+    // Các tập hợp để theo dõi các request và tham số đã thấy, giúp tránh trùng lặp và phát hiện tham số mới
+    private final Set<String> loggedRequests = new HashSet<>();
+    private final Map<String, Set<String>> pathToParams = new HashMap<>();
+
+    // Các nhãn (Label) để hiển thị thống kê
     private final JLabel totalLbl    = new JLabel("Total: 0");
     private final JLabel scannedLbl  = new JLabel("Scanned: 0");
     private final JLabel rejectedLbl = new JLabel("Rejected: 0");
     private final JLabel bypassLbl   = new JLabel("Bypass: 0");
     private final JLabel unverifiedLbl   = new JLabel("Unverified: 0");
 
+    /**
+     * Phương thức khởi tạo, được Burp gọi khi extension được tải.
+     * @param api Đối tượng MontoyaApi để tương tác với Burp.
+     */
     @Override
     public void initialize(MontoyaApi api) {
         this.api = api;
         api.extension().setName("Recheck Scan API");
-        api.extension().registerUnloadingHandler(this);
-        loadSavedSettings();
-        SwingUtilities.invokeLater(this::createUI);
+        api.extension().registerUnloadingHandler(this); // Đăng ký xử lý khi extension được gỡ bỏ
 
+        loadSavedSettings(); // Tải các cài đặt đã lưu
+        SwingUtilities.invokeLater(this::createUI); // Tạo giao diện người dùng trên luồng Event Dispatch Thread (EDT)
+
+        // Đăng ký một HTTP handler để xử lý các request/response đi qua Burp
         api.http().registerHttpHandler(new HttpHandler() {
             @Override
             public RequestToBeSentAction handleHttpRequestToBeSent(HttpRequestToBeSent request) {
+                // Không cần xử lý request trước khi gửi đi, cho qua
                 return RequestToBeSentAction.continueWith(request);
             }
 
+            /**
+             * Xử lý mỗi response HTTP mà Burp nhận được.
+             */
             @Override
             public ResponseReceivedAction handleHttpResponseReceived(HttpResponseReceived response) {
                 HttpRequest request = response.initiatingRequest();
                 String method = request.method();
+
+                // 1. Bỏ qua các request không cần thiết
                 if (method.equals("OPTIONS")) return ResponseReceivedAction.continueWith(response);
                 ToolType sourceType = response.toolSource().toolType();
                 if (sourceType == ToolType.EXTENSIONS) return ResponseReceivedAction.continueWith(response);
@@ -72,15 +95,16 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 boolean isScanner = sourceType == ToolType.SCANNER;
                 String host = request.httpService().host();
                 String path = request.pathWithoutQuery();
-                String uniqueKey = host + "|" + path;
+                String uniqueKey = host + "|" + path; // Tạo một khóa định danh duy nhất cho mỗi API endpoint
 
+                // 2. Xử lý đặc biệt cho các request từ Scanner: chỉ cập nhật trạng thái "Scanned"
                 if (isScanner) {
                     SwingUtilities.invokeLater(() -> {
                         for (int i = 0; i < tableModel.getRowCount(); i++) {
                             String existingHost = tableModel.getValueAt(i, 1).toString();
                             String existingPath = tableModel.getValueAt(i, 2).toString();
                             if (host.equals(existingHost) && path.equals(existingPath)) {
-                                tableModel.setValueAt(true, i, 4);
+                                tableModel.setValueAt(true, i, 4); // Cập nhật cột "Scanned" thành true
                                 break;
                             }
                         }
@@ -88,9 +112,11 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                     return ResponseReceivedAction.continueWith(response);
                 }
 
+                // 3. Logic chính: chỉ xử lý các request trong scope và không thuộc danh sách loại trừ
                 if (api.scope().isInScope(request.url()) && !isExcluded(path)) {
                     String query = request.query();
 
+                    // 3a. Tự động bypass các API GET không có tham số nếu tùy chọn được bật
                     if (autoBypassNoParamGet && "GET".equals(method) && (query == null || query.isBlank())) {
                         SwingUtilities.invokeLater(() -> {
                             boolean found = false;
@@ -111,7 +137,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                         return ResponseReceivedAction.continueWith(response);
                     }
 
-
+                    // 3b. Phân tích và thu thập các tham số từ URL
                     Set<String> newParams = new HashSet<>();
                     if (query != null && !query.isBlank()) {
                         for (String pair : query.split("&")) {
@@ -127,14 +153,14 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                     pathToParams.put(uniqueKey, knownParams);
 
                     String displayNote = knownParams.stream().sorted().collect(Collectors.joining(", "));
-
                     if (!addedParams.isEmpty()) {
                         displayNote += " [new: " + addedParams.stream().sorted().collect(Collectors.joining(", ")) + "]";
                     }
 
                     final String finalDisplayNote = displayNote;
-                    final boolean[] hehe = new boolean[1];
+                    final boolean[] states = new boolean[2]; // Dùng để lấy trạng thái ra khỏi luồng UI
 
+                    // 3c. Cập nhật hoặc thêm mới dòng vào bảng trên luồng giao diện người dùng (EDT) để đảm bảo an toàn
                     try {
                         SwingUtilities.invokeAndWait(() -> {
                             boolean found = false;
@@ -142,10 +168,10 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                                 String existingHost = tableModel.getValueAt(i, 1).toString();
                                 String existingPath = tableModel.getValueAt(i, 2).toString();
                                 if (host.equals(existingHost) && path.equals(existingPath)) {
-                                    boolean scanned = Boolean.TRUE.equals(tableModel.getValueAt(i, 4));
                                     tableModel.setValueAt(finalDisplayNote, i, 3);
+                                    states[0] = Boolean.TRUE.equals(tableModel.getValueAt(i, 4)); // Scanned
+                                    states[1] = Boolean.TRUE.equals(tableModel.getValueAt(i, 6)); // Bypass
                                     found = true;
-                                    hehe[0] = scanned;
                                     break;
                                 }
                             }
@@ -159,9 +185,21 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                         throw new RuntimeException(e);
                     }
 
-                    if (hehe[0]) {
-                        if (highlightEnabled) response.annotations().setHighlightColor(HighlightColor.YELLOW);
-                        if (noteEnabled) response.annotations().setNotes("Scanned");
+                    // 3d. Cập nhật highlight và note cho request trong Proxy history dựa trên trạng thái đã lấy
+                    boolean isScannedState = states[0];
+                    boolean isBypassedState = states[1];
+
+                    if (highlightEnabled) {
+                        if (isScannedState || isBypassedState) {
+                            response.annotations().setHighlightColor(HighlightColor.YELLOW);
+                        }
+                    }
+                    if (noteEnabled) {
+                        if (isScannedState) {
+                            response.annotations().setNotes("Scanned");
+                        } else if (isBypassedState) {
+                            response.annotations().setNotes("Bypassed");
+                        }
                     }
                 }
                 return ResponseReceivedAction.continueWith(response);
@@ -170,18 +208,58 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     }
 
 
+    /**
+     * Phương thức chính để xây dựng toàn bộ giao diện người dùng cho extension.
+     */
     private void createUI() {
+        // Tạo TableModel tùy chỉnh để quản lý dữ liệu và hành vi của bảng
         tableModel = new DefaultTableModel(new Object[]{"Method", "Host", "Path", "Note", "Scanned", "Rejected", "Bypass"}, 0) {
+            
+            /**
+             * Quy định cột nào có thể được chỉnh sửa.
+             * Nếu API đã được Scanned, không cho phép sửa Rejected và Bypass.
+             */
             @Override
             public boolean isCellEditable(int row, int column) {
-                return column == 5 || column == 6;
+                if (column == 5 || column == 6) { // Cột "Rejected" và "Bypass"
+                    boolean isScanned = Boolean.TRUE.equals(getValueAt(row, 4));
+                    return !isScanned; // Chỉ cho phép sửa nếu chưa bị Scanned
+                }
+                return false; // Các cột khác không được sửa
             }
+
+            /**
+             * Định nghĩa kiểu dữ liệu cho từng cột để hiển thị đúng (vd: checkbox cho boolean)
+             */
             @Override
             public Class<?> getColumnClass(int columnIndex) {
                 return (columnIndex >= 4 && columnIndex <= 6) ? Boolean.class : String.class;
             }
+
+            /**
+             * Ghi đè logic khi một giá trị trong ô được thay đổi.
+             * Dùng để đảm bảo chỉ có 1 trong 3 checkbox trạng thái (Scanned, Rejected, Bypass) được chọn.
+             */
+            @Override
+            public void setValueAt(Object aValue, int row, int col) {
+                super.setValueAt(aValue, row, col); // Thực hiện thay đổi giá trị trước
+
+                // Nếu không phải là cột trạng thái thì bỏ qua
+                if (col < 4 || col > 6) {
+                    return;
+                }
+                // Nếu một ô được tích (true), bỏ tích 2 ô còn lại
+                if (Boolean.TRUE.equals(aValue)) {
+                    for (int i = 4; i <= 6; i++) {
+                        if (i != col) {
+                            super.setValueAt(false, row, i);
+                        }
+                    }
+                }
+            }
         };
 
+        // Lắng nghe mọi thay đổi trên model (thêm, sửa, xóa) để lưu dữ liệu và cập nhật thống kê
         TableModelListener tableListener = e -> {
             if (e.getType() == TableModelEvent.UPDATE || e.getType() == TableModelEvent.INSERT || e.getType() == TableModelEvent.DELETE) {
                 saveTableData();
@@ -190,13 +268,15 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         };
         tableModel.addTableModelListener(tableListener);
 
+        // Tạo TabbedPane để chứa các tab
         JTabbedPane tabs = new JTabbedPane();
 
-        // --- Unscanned Panel ---
+        // --- Thiết lập tab Unscanned ---
         JTable unscannedTable = createCommonTable();
         final TableRowSorter<DefaultTableModel> unscannedSorter = new TableRowSorter<>(tableModel);
         unscannedTable.setRowSorter(unscannedSorter);
 
+        // Tạo bộ lọc (Filter) chỉ hiển thị các dòng chưa được xử lý
         final RowFilter<Object, Object> unscannedStatusFilter = new RowFilter<>() {
             public boolean include(Entry<?, ?> entry) {
                 boolean scanned = Boolean.TRUE.equals(entry.getValue(4));
@@ -205,8 +285,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 return !scanned && !rejected && !bypass;
             }
         };
-        unscannedSorter.setRowFilter(unscannedStatusFilter);
+        unscannedSorter.setRowFilter(unscannedStatusFilter); // Áp dụng bộ lọc ban đầu
 
+        // Tạo và xử lý nút Refresh cho tab Unscanned
         JButton unscannedRefreshButton = new JButton("Refresh");
         unscannedRefreshButton.addActionListener(e -> unscannedSorter.setRowFilter(unscannedStatusFilter));
 
@@ -216,7 +297,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         });
         tabs.addTab("Unscanned", unscannedPanel);
 
-        // --- Logs Panel ---
+        // --- Thiết lập tab Logs ---
         JTable logsTable = createCommonTable();
         final TableRowSorter<DefaultTableModel> logsSorter = new TableRowSorter<>(tableModel);
         logsTable.setRowSorter(logsSorter);
@@ -230,7 +311,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         tabs.addTab("Logs", logsPanel);
 
 
-        // --- Settings Panel ---
+        // --- Thiết lập tab Settings ---
         JTextArea extensionArea = new JTextArea(savedExtensions != null ? savedExtensions : ".js, .svg, .css, .png, .jpg, .ttf, .ico, .html, .map, .gif, .woff2, .bcmap, .jpeg, .woff");
         JTextField outputPathField = new JTextField(savedOutputPath != null ? savedOutputPath : "");
         JButton browseButton = new JButton("Browse");
@@ -241,14 +322,14 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             }
         });
 
-        JCheckBox highlightCheckBox = new JCheckBox("Highlight scanned requests in Proxy history");
+        JCheckBox highlightCheckBox = new JCheckBox("Highlight Scanned/Bypassed requests in Proxy history");
         highlightCheckBox.setSelected(highlightEnabled);
         highlightCheckBox.addActionListener(e -> {
             highlightEnabled = highlightCheckBox.isSelected();
             saveSettings();
         });
 
-        JCheckBox noteCheckBox = new JCheckBox("Add note to scanned requests in Proxy history");
+        JCheckBox noteCheckBox = new JCheckBox("Add Note to Scanned/Bypassed requests in Proxy history");
         noteCheckBox.setSelected(noteEnabled);
         noteCheckBox.addActionListener(e -> {
             noteEnabled = noteCheckBox.isSelected();
@@ -264,20 +345,36 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
         JButton applyButton = new JButton("Apply");
         applyButton.addActionListener(e -> {
-            // Save current settings from the text fields
             savedExtensions = extensionArea.getText().trim();
             savedOutputPath = outputPathField.getText().trim();
             saveSettings();
 
-            // FIXED: Temporarily remove the listener to prevent saving an empty table
+            // Tạm thời gỡ bỏ listener để tránh lỗi ghi đè file log khi đang tải lại
             tableModel.removeTableModelListener(tableListener);
 
-            // Safely clear and reload the table
             tableModel.setRowCount(0);
             loggedRequests.clear();
-            loadLogData(); // Reloads from the (potentially new) log file path
+            loadLogData(); // Tải lại dữ liệu
 
-            // Re-add the listener for future operations
+            // Tự động tích bypass cho các API thoả mãn trong log
+            if (autoBypassNoParamGet) {
+                SwingUtilities.invokeLater(() -> {
+                    for (int i = 0; i < tableModel.getRowCount(); i++) {
+                        String method = tableModel.getValueAt(i, 0).toString();
+                        Object noteValue = tableModel.getValueAt(i, 3);
+                        String note = (noteValue == null) ? "" : noteValue.toString().trim();
+                        if ("GET".equals(method) && note.isEmpty()) {
+                            boolean isScanned = Boolean.TRUE.equals(tableModel.getValueAt(i, 4));
+                            boolean isRejected = Boolean.TRUE.equals(tableModel.getValueAt(i, 5));
+                            if (!isScanned && !isRejected) {
+                                tableModel.setValueAt(true, i, 6);
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Thêm lại listener để các thao tác sau đó hoạt động bình thường
             tableModel.addTableModelListener(tableListener);
 
             JOptionPane.showMessageDialog(null, "Settings saved and project loaded.");
@@ -285,27 +382,37 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
         tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightCheckBox, noteCheckBox, autoBypassCheckBox, applyButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl));
 
+        // Lắp ráp giao diện chính
         JPanel mainPanel = new JPanel(new BorderLayout());
         mainPanel.add(tabs, BorderLayout.CENTER);
         api.userInterface().registerSuiteTab("Recheck Scan", mainPanel);
         loadLogData();
     }
 
+    /**
+     * Phương thức hỗ trợ để tạo một JTable với các thuộc tính chung.
+     * @return một đối tượng JTable đã được cấu hình.
+     */
     private JTable createCommonTable() {
         JTable table = new JTable(tableModel);
         table.setRowHeight(28);
         table.setFillsViewportHeight(true);
 
+        // Vô hiệu hóa việc kéo thả để sắp xếp lại cột, cố định vị trí các cột
+        table.getTableHeader().setReorderingAllowed(false);
+
+        // Tùy chỉnh cách hiển thị cho các ô checkbox
         table.setDefaultRenderer(Boolean.class, (tbl, value, isSelected, hasFocus, row, column) -> {
             JCheckBox checkBox = new JCheckBox();
             checkBox.setSelected(Boolean.TRUE.equals(value));
             checkBox.setHorizontalAlignment(SwingConstants.CENTER);
             checkBox.setOpaque(true);
             checkBox.setBackground(isSelected ? tbl.getSelectionBackground() : tbl.getBackground());
-            if (column == 4) checkBox.setEnabled(false);
+            if (column == 4) checkBox.setEnabled(false); // Làm cho ô "Scanned" trông bị vô hiệu hóa
             return checkBox;
         });
 
+        // Tùy chỉnh cách hiển thị cho các ô chuỗi (để tô đỏ tham số mới)
         table.setDefaultRenderer(String.class, new DefaultTableCellRenderer() {
             @Override
             public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
@@ -319,6 +426,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             }
         });
 
+        // Gán sự kiện Ctrl+C để sao chép đường dẫn
         table.getInputMap(JComponent.WHEN_FOCUSED).put(KeyStroke.getKeyStroke("ctrl C"), "copyPath");
         table.getActionMap().put("copyPath", new AbstractAction() {
             @Override
@@ -339,6 +447,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         return table;
     }
 
+    /**
+     * Phương thức hỗ trợ để tạo một panel hoàn chỉnh chứa bảng, thanh tìm kiếm và nút refresh.
+     */
     private JPanel createApiPanel(String searchLabel, JTable table, JButton refreshButton, SearchHandler handler) {
         JPanel panel = new JPanel(new BorderLayout(0, 5));
         panel.setBorder(BorderFactory.createEmptyBorder(5,5,5,5));
@@ -359,6 +470,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         
         panel.add(topPanel, BorderLayout.NORTH);
 
+        // Xử lý sự kiện tìm kiếm
         searchField.getDocument().addDocumentListener(new DocumentListener() {
             public void insertUpdate(DocumentEvent e) { filter(); }
             public void removeUpdate(DocumentEvent e) { filter(); }
@@ -371,11 +483,17 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         return panel;
     }
     
+    /**
+     * Một functional interface để xử lý logic tìm kiếm một cách linh hoạt.
+     */
     @FunctionalInterface
     interface SearchHandler {
         void apply(String keyword, TableRowSorter<DefaultTableModel> sorter);
     }
 
+    /**
+     * Lưu các cài đặt vào file cấu hình.
+     */
     private void saveSettings() {
         try {
             File configFile = new File(System.getProperty("user.home"), "AppData/Local/RecheckScan/scan_api.txt");
@@ -388,6 +506,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         }
     }
 
+    /**
+     * Tải các cài đặt từ file cấu hình khi khởi động.
+     */
     private void loadSavedSettings() {
         try {
             File configFile = new File(System.getProperty("user.home"), "AppData/Local/RecheckScan/scan_api.txt");
@@ -405,11 +526,14 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     }
 
 
+    /**
+     * Tải dữ liệu log vào bảng.
+     */
     private void loadLogData() {
         File logFile = getLogFile();
         if (logFile.exists()) {
             try {
-                // This method is now safe to be called when the listener is detached
+                tableModel.setRowCount(0);
                 List<String> lines = Files.readAllLines(logFile.toPath());
                 List<Object[]> newRows = new ArrayList<>();
                 for (String line : lines) {
@@ -434,16 +558,25 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         updateStats();
     }
 
+    /**
+     * Lấy đường dẫn file log, ưu tiên đường dẫn do người dùng cài đặt.
+     */
     private File getLogFile() {
         File defaultLogFile = new File(System.getProperty("user.home"), "AppData/Local/RecheckScan/scan_api_log.csv");
         return (savedOutputPath != null && !savedOutputPath.isBlank()) ? new File(savedOutputPath) : defaultLogFile;
     }
 
+    /**
+     * Kiểm tra xem một đường dẫn có bị loại trừ dựa trên phần mở rộng hay không.
+     */
     private boolean isExcluded(String path) {
         if (savedExtensions == null || savedExtensions.isBlank()) return false;
         return Arrays.stream(savedExtensions.split(",")).map(String::trim).anyMatch(path.toLowerCase()::endsWith);
     }
 
+    /**
+     * Lưu toàn bộ dữ liệu từ bảng vào file log.
+     */
     private void saveTableData() {
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(getLogFile(), false))) {
             for (int i = 0; i < tableModel.getRowCount(); i++) {
@@ -466,6 +599,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     }
 
 
+    /**
+     * Tính toán và cập nhật các nhãn thống kê.
+     */
     private void updateStats(){
         int total = tableModel.getRowCount();
         int scanned=0, rejected=0, bypass=0;
@@ -482,6 +618,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         unverifiedLbl.setText("Unverified: "+ unverified);
     }
 
+    /**
+     * Được gọi khi extension bị gỡ bỏ, đảm bảo dữ liệu trong bảng được lưu lại.
+     */
     @Override
     public void extensionUnloaded() {
         saveTableData();
