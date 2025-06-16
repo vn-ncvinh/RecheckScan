@@ -180,7 +180,7 @@ public class DatabaseManager {
                 if (!newDiscoveredParams.isEmpty()) {
                     unscannedSet.addAll(newDiscoveredParams);
                     String updatedUnscannedParams = setToString(unscannedSet);
-                    String updateSql = "UPDATE api_log SET unscanned_params = ?, is_scanned = 0, last_seen = CURRENT_TIMESTAMP WHERE host = ? AND path = ? AND method = ?";
+                    String updateSql = "UPDATE api_log SET unscanned_params = ?, is_scanned = 0, is_bypassed = 0, last_seen = CURRENT_TIMESTAMP WHERE host = ? AND path = ? AND method = ?";
                     try (PreparedStatement updateStmt = connection.prepareStatement(updateSql)) {
                         updateStmt.setString(1, updatedUnscannedParams);
                         updateStmt.setString(2, host);
