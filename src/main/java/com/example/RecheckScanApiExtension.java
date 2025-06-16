@@ -66,7 +66,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 String method = request.method();
                 ToolType sourceType = response.toolSource().toolType();
 
-                if (method.equals("OPTIONS") || sourceType == ToolType.INTRUDER || sourceType == ToolType.EXTENSIONS) {
+                if (method.equals("OPTIONS") || response.statusCode() == (short) 404|| sourceType == ToolType.INTRUDER || sourceType == ToolType.EXTENSIONS) {
                     return ResponseReceivedAction.continueWith(response);
                 }
 
@@ -84,13 +84,12 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
                 if (sourceType == ToolType.SCANNER) {
                     new Thread(() -> {
-                        boolean updated = databaseManager.processScannedParameters(host, path, requestParams);
+                        boolean updated = databaseManager.processScannedParameters(method, host, path, requestParams);
                         if (updated) {
                             SwingUtilities.invokeLater(RecheckScanApiExtension.this::loadDataFromDb);
                         }
                     }).start();
                 } else if (api.scope().isInScope(request.url()) && !isExcludedByExtension(path)) {
-                    // KHÔI PHỤC LẠI: Luồng xử lý cho autoBypassNoParamGet
                     boolean isGetWithoutParams = "GET".equals(method) && requestParams.isEmpty();
                     if (autoBypassNoParamGet && isGetWithoutParams) {
                         new Thread(() -> {
@@ -102,7 +101,6 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                          if (highlightEnabled) response.annotations().setHighlightColor(HighlightColor.YELLOW);
                          if (noteEnabled) response.annotations().setNotes("Bypassed");
                     } else {
-                        // Luồng xử lý request thông thường
                         new Thread(() -> {
                             databaseManager.insertOrUpdateApi(method, host, path, requestParams);
                             SwingUtilities.invokeLater(RecheckScanApiExtension.this::loadDataFromDb);
@@ -110,7 +108,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                     }
                 }
 
-                Object[] status = databaseManager.getApiStatus(host, path);
+                Object[] status = databaseManager.getApiStatus(method, host, path);
                 if (status != null) {
                     boolean isScanned = (boolean) status[0];
                     boolean isBypassed = (boolean) status[2];
@@ -132,8 +130,6 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         });
     }
 
-    // Giữ nguyên các phương thức còn lại của RecheckScanApiExtension
-    // ...
     private void updateOrInsertTableRow(Object[] rowData) {
         int dbId = (int) rowData[7];
         Integer modelRowIndex = findModelRowByDbId(dbId);

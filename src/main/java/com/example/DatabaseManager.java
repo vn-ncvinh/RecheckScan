@@ -55,7 +55,7 @@ public class DatabaseManager {
                 is_rejected BOOLEAN DEFAULT 0,
                 is_bypassed BOOLEAN DEFAULT 0,
                 last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(host, path)
+                UNIQUE(host, path, method)
             );
             """;
         try (Statement stmt = connection.createStatement()) {
@@ -96,10 +96,11 @@ public class DatabaseManager {
     }
 
     public synchronized void insertOrUpdateApi(String method, String host, String path, Set<String> requestParams) {
-        String selectSql = "SELECT unscanned_params, scanned_params FROM api_log WHERE host = ? AND path = ?";
+        String selectSql = "SELECT unscanned_params, scanned_params FROM api_log WHERE host = ? AND path = ? AND method = ?";
         try (PreparedStatement selectStmt = connection.prepareStatement(selectSql)) {
             selectStmt.setString(1, host);
             selectStmt.setString(2, path);
+            selectStmt.setString(3, method);
             ResultSet rs = selectStmt.executeQuery();
 
             if (rs.next()) {
@@ -113,11 +114,12 @@ public class DatabaseManager {
                 if (!newDiscoveredParams.isEmpty()) {
                     unscannedSet.addAll(newDiscoveredParams);
                     String updatedUnscannedParams = setToString(unscannedSet);
-                    String updateSql = "UPDATE api_log SET unscanned_params = ?, is_scanned = 0, last_seen = CURRENT_TIMESTAMP WHERE host = ? AND path = ?";
+                    String updateSql = "UPDATE api_log SET unscanned_params = ?, is_scanned = 0, last_seen = CURRENT_TIMESTAMP WHERE host = ? AND path = ? AND method = ?";
                     try (PreparedStatement updateStmt = connection.prepareStatement(updateSql)) {
                         updateStmt.setString(1, updatedUnscannedParams);
                         updateStmt.setString(2, host);
                         updateStmt.setString(3, path);
+                        updateStmt.setString(4, method);
                         updateStmt.executeUpdate();
                     }
                 }
@@ -137,11 +139,12 @@ public class DatabaseManager {
         }
     }
     
-    public synchronized boolean processScannedParameters(String host, String path, Set<String> scannerParams) {
-        String selectSql = "SELECT unscanned_params, scanned_params FROM api_log WHERE host = ? AND path = ?";
+    public synchronized boolean processScannedParameters(String method, String host, String path, Set<String> scannerParams) {
+        String selectSql = "SELECT unscanned_params, scanned_params FROM api_log WHERE host = ? AND path = ? AND method = ?";
         try (PreparedStatement selectStmt = connection.prepareStatement(selectSql)) {
             selectStmt.setString(1, host);
             selectStmt.setString(2, path);
+            selectStmt.setString(3, method);
             ResultSet rs = selectStmt.executeQuery();
 
             if (rs.next()) {
@@ -150,20 +153,20 @@ public class DatabaseManager {
 
                 Set<String> newlyScannedParams = new HashSet<>(scannerParams);
                 newlyScannedParams.retainAll(unscannedDbSet);
-
                 if (newlyScannedParams.isEmpty()) return false;
 
                 Set<String> scannedDbSet = stringToSet(rs.getString("scanned_params"));
                 unscannedDbSet.removeAll(newlyScannedParams);
                 scannedDbSet.addAll(newlyScannedParams);
 
-                String updateSql = "UPDATE api_log SET unscanned_params = ?, scanned_params = ?, is_scanned = ?, last_seen = CURRENT_TIMESTAMP WHERE host = ? AND path = ?";
+                String updateSql = "UPDATE api_log SET unscanned_params = ?, scanned_params = ?, is_scanned = ?, last_seen = CURRENT_TIMESTAMP WHERE host = ? AND path = ? AND method = ?";
                 try (PreparedStatement updateStmt = connection.prepareStatement(updateSql)) {
                     updateStmt.setString(1, setToString(unscannedDbSet));
                     updateStmt.setString(2, setToString(scannedDbSet));
                     updateStmt.setBoolean(3, unscannedDbSet.isEmpty());
                     updateStmt.setString(4, host);
                     updateStmt.setString(5, path);
+                    updateStmt.setString(6, method);
                     updateStmt.executeUpdate();
                     return true;
                 }
@@ -173,16 +176,12 @@ public class DatabaseManager {
         }
         return false;
     }
-    
-    /**
-     * KHÔI PHỤC LẠI: Xử lý auto-bypass cho API GET không có tham số.
-     * @return true nếu có sự thay đổi trong DB.
-     */
+
     public synchronized boolean autoBypassApi(String method, String host, String path) {
         String upsertSql = """
             INSERT INTO api_log (method, host, path, unscanned_params, scanned_params, is_bypassed)
             VALUES (?, ?, ?, '', '', 1)
-            ON CONFLICT(host, path) DO UPDATE SET
+            ON CONFLICT(host, path, method) DO UPDATE SET
                 is_bypassed = CASE
                     WHEN api_log.is_scanned = 0 AND api_log.is_rejected = 0 THEN 1
                     ELSE api_log.is_bypassed
@@ -236,11 +235,12 @@ public class DatabaseManager {
         }
     }
     
-    public Object[] getApiStatus(String host, String path) {
-        String sql = "SELECT is_scanned, is_rejected, is_bypassed FROM api_log WHERE host = ? AND path = ?";
+    public Object[] getApiStatus(String method, String host, String path) {
+        String sql = "SELECT is_scanned, is_rejected, is_bypassed FROM api_log WHERE host = ? AND path = ? AND method = ?";
         try (PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, host);
             stmt.setString(2, path);
+            stmt.setString(3, method);
             ResultSet rs = stmt.executeQuery();
             if (rs.next()) {
                 return new Object[]{rs.getBoolean("is_scanned"), rs.getBoolean("is_rejected"), rs.getBoolean("is_bypassed")};
