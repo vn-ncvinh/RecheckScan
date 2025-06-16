@@ -4,11 +4,7 @@ import burp.api.montoya.MontoyaApi;
 
 import java.io.File;
 import java.sql.*;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Set;
-import java.util.HashSet;
+import java.util.*;
 import java.util.stream.Collectors;
 
 public class DatabaseManager {
@@ -39,8 +35,8 @@ public class DatabaseManager {
     private String getDbPath(String savedOutputPath) {
         if (savedOutputPath != null && !savedOutputPath.isBlank()) {
             String path = savedOutputPath.toLowerCase().endsWith(".csv")
-                ? savedOutputPath.substring(0, savedOutputPath.length() - 4)
-                : savedOutputPath;
+                    ? savedOutputPath.substring(0, savedOutputPath.length() - 4)
+                    : savedOutputPath;
             return path.toLowerCase().endsWith(".db") ? path : path + ".db";
         }
         return new File(System.getProperty("user.home"), "AppData/Local/RecheckScan/scan_api.db").getAbsolutePath();
@@ -53,7 +49,8 @@ public class DatabaseManager {
                 method TEXT NOT NULL,
                 host TEXT NOT NULL,
                 path TEXT NOT NULL,
-                params TEXT,
+                unscanned_params TEXT,
+                scanned_params TEXT,
                 is_scanned BOOLEAN DEFAULT 0,
                 is_rejected BOOLEAN DEFAULT 0,
                 is_bypassed BOOLEAN DEFAULT 0,
@@ -68,14 +65,24 @@ public class DatabaseManager {
 
     public List<Object[]> loadApiData() {
         List<Object[]> rows = new ArrayList<>();
-        String sql = "SELECT id, method, host, path, params, is_scanned, is_rejected, is_bypassed FROM api_log ORDER BY id DESC";
+        String sql = "SELECT id, method, host, path, unscanned_params, scanned_params, is_scanned, is_rejected, is_bypassed FROM api_log ORDER BY id DESC";
         try (Statement stmt = connection.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
+                String unscanned = rs.getString("unscanned_params");
+                String scanned = rs.getString("scanned_params");
+                StringBuilder note = new StringBuilder();
+                if (unscanned != null && !unscanned.isEmpty()) {
+                    note.append("Unscanned: [").append(unscanned.replace("|", ", ")).append("] ");
+                }
+                if (scanned != null && !scanned.isEmpty()) {
+                    note.append("Scanned: [").append(scanned.replace("|", ", ")).append("]");
+                }
+
                 rows.add(new Object[]{
                         rs.getString("method"),
                         rs.getString("host"),
                         rs.getString("path"),
-                        rs.getString("params") != null ? rs.getString("params").replace("|", ", ") : "",
+                        note.toString().trim(),
                         rs.getBoolean("is_scanned"),
                         rs.getBoolean("is_rejected"),
                         rs.getBoolean("is_bypassed"),
@@ -88,63 +95,121 @@ public class DatabaseManager {
         return rows;
     }
 
-    public synchronized Object[] insertOrUpdateApi(String method, String host, String path, Set<String> newParamsSet) {
-        String newParamsStr = newParamsSet.stream().sorted().collect(Collectors.joining("|"));
-        String upsertSql = """
-            INSERT INTO api_log (method, host, path, params) VALUES (?, ?, ?, ?)
-            ON CONFLICT(host, path) DO UPDATE SET
-                params=excluded.params,
-                is_scanned = CASE WHEN api_log.params = excluded.params THEN api_log.is_scanned ELSE 0 END,
-                last_seen=CURRENT_TIMESTAMP
-            RETURNING id, method, host, path, params, is_scanned, is_rejected, is_bypassed;
-            """;
+    public synchronized void insertOrUpdateApi(String method, String host, String path, Set<String> requestParams) {
+        String selectSql = "SELECT unscanned_params, scanned_params FROM api_log WHERE host = ? AND path = ?";
+        try (PreparedStatement selectStmt = connection.prepareStatement(selectSql)) {
+            selectStmt.setString(1, host);
+            selectStmt.setString(2, path);
+            ResultSet rs = selectStmt.executeQuery();
 
-        try {
-            String oldParamsStr = getExistingParams(host, path);
-            Set<String> oldParams = (oldParamsStr == null || oldParamsStr.isEmpty()) ? new HashSet<>() : new HashSet<>(Arrays.asList(oldParamsStr.split("\\|")));
-            Set<String> addedParams = new HashSet<>(newParamsSet);
-            addedParams.removeAll(oldParams);
+            if (rs.next()) {
+                Set<String> unscannedSet = stringToSet(rs.getString("unscanned_params"));
+                Set<String> scannedSet = stringToSet(rs.getString("scanned_params"));
+                Set<String> knownParams = new HashSet<>(unscannedSet);
+                knownParams.addAll(scannedSet);
+                Set<String> newDiscoveredParams = new HashSet<>(requestParams);
+                newDiscoveredParams.removeAll(knownParams);
 
-            try (PreparedStatement upsertStmt = connection.prepareStatement(upsertSql)) {
-                upsertStmt.setString(1, method);
-                upsertStmt.setString(2, host);
-                upsertStmt.setString(3, path);
-                upsertStmt.setString(4, newParamsStr);
-                
-                ResultSet rs = upsertStmt.executeQuery();
-                if (rs.next()) {
-                    String displayNote = newParamsSet.stream().sorted().collect(Collectors.joining(", "));
-                    if (!addedParams.isEmpty()) {
-                        displayNote += " [new: " + addedParams.stream().sorted().collect(Collectors.joining(", ")) + "]";
+                if (!newDiscoveredParams.isEmpty()) {
+                    unscannedSet.addAll(newDiscoveredParams);
+                    String updatedUnscannedParams = setToString(unscannedSet);
+                    String updateSql = "UPDATE api_log SET unscanned_params = ?, is_scanned = 0, last_seen = CURRENT_TIMESTAMP WHERE host = ? AND path = ?";
+                    try (PreparedStatement updateStmt = connection.prepareStatement(updateSql)) {
+                        updateStmt.setString(1, updatedUnscannedParams);
+                        updateStmt.setString(2, host);
+                        updateStmt.setString(3, path);
+                        updateStmt.executeUpdate();
                     }
-                    return new Object[]{
-                            rs.getString("method"),
-                            rs.getString("host"),
-                            rs.getString("path"),
-                            displayNote,
-                            rs.getBoolean("is_scanned"),
-                            rs.getBoolean("is_rejected"),
-                            rs.getBoolean("is_bypassed"),
-                            rs.getInt("id")
-                    };
+                }
+            } else {
+                String paramsStr = setToString(requestParams);
+                String insertSql = "INSERT INTO api_log (method, host, path, unscanned_params) VALUES (?, ?, ?, ?)";
+                try (PreparedStatement insertStmt = connection.prepareStatement(insertSql)) {
+                    insertStmt.setString(1, method);
+                    insertStmt.setString(2, host);
+                    insertStmt.setString(3, path);
+                    insertStmt.setString(4, paramsStr);
+                    insertStmt.executeUpdate();
                 }
             }
         } catch (SQLException e) {
             api.logging().logToError("Error during insert/update API: " + e.getMessage(), e);
         }
-        return null;
     }
+    
+    public synchronized boolean processScannedParameters(String host, String path, Set<String> scannerParams) {
+        String selectSql = "SELECT unscanned_params, scanned_params FROM api_log WHERE host = ? AND path = ?";
+        try (PreparedStatement selectStmt = connection.prepareStatement(selectSql)) {
+            selectStmt.setString(1, host);
+            selectStmt.setString(2, path);
+            ResultSet rs = selectStmt.executeQuery();
 
-    private String getExistingParams(String host, String path) throws SQLException {
-        String sql = "SELECT params FROM api_log WHERE host = ? AND path = ?";
-        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
-            stmt.setString(1, host);
-            stmt.setString(2, path);
-            ResultSet rs = stmt.executeQuery();
-            return rs.next() ? rs.getString("params") : null;
+            if (rs.next()) {
+                Set<String> unscannedDbSet = stringToSet(rs.getString("unscanned_params"));
+                if (unscannedDbSet.isEmpty()) return false;
+
+                Set<String> newlyScannedParams = new HashSet<>(scannerParams);
+                newlyScannedParams.retainAll(unscannedDbSet);
+
+                if (newlyScannedParams.isEmpty()) return false;
+
+                Set<String> scannedDbSet = stringToSet(rs.getString("scanned_params"));
+                unscannedDbSet.removeAll(newlyScannedParams);
+                scannedDbSet.addAll(newlyScannedParams);
+
+                String updateSql = "UPDATE api_log SET unscanned_params = ?, scanned_params = ?, is_scanned = ?, last_seen = CURRENT_TIMESTAMP WHERE host = ? AND path = ?";
+                try (PreparedStatement updateStmt = connection.prepareStatement(updateSql)) {
+                    updateStmt.setString(1, setToString(unscannedDbSet));
+                    updateStmt.setString(2, setToString(scannedDbSet));
+                    updateStmt.setBoolean(3, unscannedDbSet.isEmpty());
+                    updateStmt.setString(4, host);
+                    updateStmt.setString(5, path);
+                    updateStmt.executeUpdate();
+                    return true;
+                }
+            }
+        } catch (SQLException e) {
+            api.logging().logToError("Error during processScannedParameters: " + e.getMessage(), e);
+        }
+        return false;
+    }
+    
+    /**
+     * KHÔI PHỤC LẠI: Xử lý auto-bypass cho API GET không có tham số.
+     * @return true nếu có sự thay đổi trong DB.
+     */
+    public synchronized boolean autoBypassApi(String method, String host, String path) {
+        String upsertSql = """
+            INSERT INTO api_log (method, host, path, unscanned_params, scanned_params, is_bypassed)
+            VALUES (?, ?, ?, '', '', 1)
+            ON CONFLICT(host, path) DO UPDATE SET
+                is_bypassed = CASE
+                    WHEN api_log.is_scanned = 0 AND api_log.is_rejected = 0 THEN 1
+                    ELSE api_log.is_bypassed
+                END,
+                last_seen = CURRENT_TIMESTAMP
+            """;
+        try (PreparedStatement stmt = connection.prepareStatement(upsertSql)) {
+            stmt.setString(1, method);
+            stmt.setString(2, host);
+            stmt.setString(3, path);
+            return stmt.executeUpdate() > 0;
+        } catch (SQLException e) {
+            api.logging().logToError("Error during autoBypassApi: " + e.getMessage(), e);
+            return false;
         }
     }
+    
+    private Set<String> stringToSet(String str) {
+        if (str == null || str.isBlank()) return new HashSet<>();
+        return new HashSet<>(Arrays.asList(str.split("\\|")));
+    }
 
+    private String setToString(Set<String> set) {
+        if (set == null || set.isEmpty()) return "";
+        return set.stream().sorted().collect(Collectors.joining("|"));
+    }
+    
     public void updateApiStatus(int id, String columnName, boolean value) {
         if (!Arrays.asList("is_scanned", "is_rejected", "is_bypassed").contains(columnName)) {
             api.logging().logToError("Invalid column name for status update.");
@@ -159,7 +224,7 @@ public class DatabaseManager {
             api.logging().logToError("Failed to update API status: " + e.getMessage(), e);
         }
     }
-    
+
     public void close() {
         try {
             if (connection != null && !connection.isClosed()) {
@@ -170,7 +235,7 @@ public class DatabaseManager {
             api.logging().logToError("Error closing database connection: " + e.getMessage(), e);
         }
     }
-
+    
     public Object[] getApiStatus(String host, String path) {
         String sql = "SELECT is_scanned, is_rejected, is_bypassed FROM api_log WHERE host = ? AND path = ?";
         try (PreparedStatement stmt = connection.prepareStatement(sql)) {
@@ -178,81 +243,10 @@ public class DatabaseManager {
             stmt.setString(2, path);
             ResultSet rs = stmt.executeQuery();
             if (rs.next()) {
-                return new Object[]{
-                    rs.getBoolean("is_scanned"),
-                    rs.getBoolean("is_rejected"),
-                    rs.getBoolean("is_bypassed")
-                };
+                return new Object[]{rs.getBoolean("is_scanned"), rs.getBoolean("is_rejected"), rs.getBoolean("is_bypassed")};
             }
         } catch (SQLException e) {
             api.logging().logToError("Failed to get API status for " + host + path + ": " + e.getMessage(), e);
-        }
-        return null;
-    }
-
-    public synchronized Object[] insertOrBypassApi(String method, String host, String path) {
-        String upsertSql = """
-            INSERT INTO api_log (method, host, path, params, is_bypassed)
-            VALUES (?, ?, ?, '', 1)
-            ON CONFLICT(host, path) DO UPDATE SET
-                is_bypassed = CASE
-                    WHEN api_log.is_scanned = 0 AND api_log.is_rejected = 0 THEN 1
-                    ELSE api_log.is_bypassed
-                END,
-                last_seen = CURRENT_TIMESTAMP
-            RETURNING id, method, host, path, params, is_scanned, is_rejected, is_bypassed;
-            """;
-        try (PreparedStatement upsertStmt = connection.prepareStatement(upsertSql)) {
-            upsertStmt.setString(1, method);
-            upsertStmt.setString(2, host);
-            upsertStmt.setString(3, path);
-            ResultSet rs = upsertStmt.executeQuery();
-            if (rs.next()) {
-                return new Object[]{
-                        rs.getString("method"),
-                        rs.getString("host"),
-                        rs.getString("path"),
-                        "",
-                        rs.getBoolean("is_scanned"),
-                        rs.getBoolean("is_rejected"),
-                        rs.getBoolean("is_bypassed"),
-                        rs.getInt("id")
-                };
-            }
-        } catch (SQLException e) {
-            api.logging().logToError("Error during insert/bypass API: " + e.getMessage(), e);
-        }
-        return null;
-    }
-    
-    public Integer findIdByHostPath(String host, String path) {
-        String sql = "SELECT id FROM api_log WHERE host = ? AND path = ?";
-        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
-            stmt.setString(1, host);
-            stmt.setString(2, path);
-            ResultSet rs = stmt.executeQuery();
-            return rs.next() ? rs.getInt("id") : null;
-        } catch (SQLException e) {
-            api.logging().logToError("Failed to find API ID for " + host + path + ": " + e.getMessage(), e);
-            return null;
-        }
-    }
-
-    /**
-     * Lấy trạng thái quét và danh sách tham số hiện tại của một API.
-     * @return Mảng Object chứa {is_scanned (Boolean), params (String)}, hoặc null nếu không tìm thấy.
-     */
-    public Object[] getApiState(String host, String path) {
-        String sql = "SELECT is_scanned, params FROM api_log WHERE host = ? AND path = ?";
-        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
-            stmt.setString(1, host);
-            stmt.setString(2, path);
-            ResultSet rs = stmt.executeQuery();
-            if (rs.next()) {
-                return new Object[]{ rs.getBoolean("is_scanned"), rs.getString("params") };
-            }
-        } catch (SQLException e) {
-            api.logging().logToError("Failed to get API state for " + host + path + ": " + e.getMessage(), e);
         }
         return null;
     }

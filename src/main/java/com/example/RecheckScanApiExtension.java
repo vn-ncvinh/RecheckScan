@@ -19,12 +19,8 @@ import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.*;
 import java.util.List;
-import java.util.Set;
-import java.util.HashSet;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Arrays;
 import java.util.stream.Collectors;
 
 public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadingHandler {
@@ -49,11 +45,10 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     @Override
     public void initialize(MontoyaApi api) {
         this.api = api;
-        api.extension().setName("Recheck Scan API (SQLite)");
+        api.extension().setName("Recheck Scan API (v2)");
         api.extension().registerUnloadingHandler(this);
 
         loadSavedSettings();
-
         databaseManager = new DatabaseManager(api);
         databaseManager.initialize(savedOutputPath);
 
@@ -77,101 +72,44 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
                 String host = request.httpService().host();
                 String path = request.pathWithoutQuery();
+                String query = request.query();
+                
+                Set<String> requestParams = new HashSet<>();
+                if (query != null && !query.isBlank()) {
+                    for (String pair : query.split("&")) {
+                        String[] kv = pair.split("=", 2);
+                        if (kv.length > 0) requestParams.add(kv[0].trim());
+                    }
+                }
 
-                // Trường hợp A: Request từ Scanner.
                 if (sourceType == ToolType.SCANNER) {
                     new Thread(() -> {
-                        Integer dbId = databaseManager.findIdByHostPath(host, path);
-                        if (dbId != null) {
-                            databaseManager.updateApiStatus(dbId, "is_scanned", true);
-                            databaseManager.updateApiStatus(dbId, "is_rejected", false);
-                            databaseManager.updateApiStatus(dbId, "is_bypassed", false);
+                        boolean updated = databaseManager.processScannedParameters(host, path, requestParams);
+                        if (updated) {
                             SwingUtilities.invokeLater(RecheckScanApiExtension.this::loadDataFromDb);
                         }
                     }).start();
-
-                    if (highlightEnabled) response.annotations().setHighlightColor(HighlightColor.YELLOW);
-                    if (noteEnabled) response.annotations().setNotes("Scanned");
-                    return ResponseReceivedAction.continueWith(response);
-                }
-
-                // Trường hợp B: Request trong scope.
-                if (api.scope().isInScope(request.url()) && !isExcludedByExtension(path)) {
-                    String query = request.query();
-                    boolean isGetWithoutParams = "GET".equals(method) && (query == null || query.isBlank());
-
-                    // Nhánh B1: Tự động bypass.
+                } else if (api.scope().isInScope(request.url()) && !isExcludedByExtension(path)) {
+                    // KHÔI PHỤC LẠI: Luồng xử lý cho autoBypassNoParamGet
+                    boolean isGetWithoutParams = "GET".equals(method) && requestParams.isEmpty();
                     if (autoBypassNoParamGet && isGetWithoutParams) {
                         new Thread(() -> {
-                            Object[] resultRow = databaseManager.insertOrBypassApi(method, host, path);
-                            if (resultRow != null) {
-                                SwingUtilities.invokeLater(() -> updateOrInsertTableRow(resultRow));
+                            boolean updated = databaseManager.autoBypassApi(method, host, path);
+                            if (updated) {
+                                SwingUtilities.invokeLater(RecheckScanApiExtension.this::loadDataFromDb);
                             }
                         }).start();
-
-                        if (highlightEnabled) response.annotations().setHighlightColor(HighlightColor.YELLOW);
-                        if (noteEnabled) response.annotations().setNotes("Bypassed");
-                        return ResponseReceivedAction.continueWith(response);
+                         if (highlightEnabled) response.annotations().setHighlightColor(HighlightColor.YELLOW);
+                         if (noteEnabled) response.annotations().setNotes("Bypassed");
+                    } else {
+                        // Luồng xử lý request thông thường
+                        new Thread(() -> {
+                            databaseManager.insertOrUpdateApi(method, host, path, requestParams);
+                            SwingUtilities.invokeLater(RecheckScanApiExtension.this::loadDataFromDb);
+                        }).start();
                     }
-
-                    // Nhánh B2: Xử lý request thông thường (có thể có param mới).
-                    Set<String> newParamsSet = new HashSet<>();
-                    if (query != null && !query.isBlank()) {
-                        for (String pair : query.split("&")) {
-                             String[] kv = pair.split("=", 2);
-                             if (kv.length > 0) newParamsSet.add(kv[0].trim());
-                        }
-                    }
-
-                    // Đồng bộ lấy trạng thái cũ để quyết định việc highlight/note
-                    Object[] oldState = databaseManager.getApiState(host, path);
-                    boolean shouldAnnotateAsScanned = false;
-                    boolean isBypassed = false;
-
-                    if (oldState != null) {
-                        boolean dbIsScanned = (boolean) oldState[0];
-                        String oldParamsStr = (String) oldState[1];
-                        String newParamsAsStr = newParamsSet.stream().sorted().collect(Collectors.joining("|"));
-
-                        // Nếu params không đổi, giữ nguyên trạng thái scanned.
-                        // Nếu params thay đổi, coi như chưa scan (cho mục đích annotation).
-                        if (newParamsAsStr.equals(oldParamsStr)) {
-                            shouldAnnotateAsScanned = dbIsScanned;
-                        } else {
-                            shouldAnnotateAsScanned = false;
-                        }
-                        
-                        // Lấy trạng thái bypassed từ DB để highlight
-                        Object[] fullStatus = databaseManager.getApiStatus(host, path);
-                        if (fullStatus != null) {
-                             isBypassed = (boolean) fullStatus[2];
-                        }
-                    }
-
-                    // Áp dụng annotation DỰA TRÊN LOGIC ĐÃ XỬ LÝ
-                    if (highlightEnabled && (shouldAnnotateAsScanned || isBypassed)) {
-                        response.annotations().setHighlightColor(HighlightColor.YELLOW);
-                    }
-                    if (noteEnabled) {
-                        if (shouldAnnotateAsScanned) {
-                             response.annotations().setNotes("Scanned");
-                        } else if (isBypassed) {
-                             response.annotations().setNotes("Bypassed");
-                        }
-                    }
-
-                    // Bất đồng bộ cập nhật CSDL và UI
-                    new Thread(() -> {
-                        Object[] resultRow = databaseManager.insertOrUpdateApi(method, host, path, newParamsSet);
-                        if (resultRow != null) {
-                            SwingUtilities.invokeLater(() -> updateOrInsertTableRow(resultRow));
-                        }
-                    }).start();
-                    
-                    return ResponseReceivedAction.continueWith(response);
                 }
 
-                // Trường hợp C: Fallback cho các request khác (ví dụ: out of scope nhưng đã có trong DB)
                 Object[] status = databaseManager.getApiStatus(host, path);
                 if (status != null) {
                     boolean isScanned = (boolean) status[0];
@@ -194,6 +132,8 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         });
     }
 
+    // Giữ nguyên các phương thức còn lại của RecheckScanApiExtension
+    // ...
     private void updateOrInsertTableRow(Object[] rowData) {
         int dbId = (int) rowData[7];
         Integer modelRowIndex = findModelRowByDbId(dbId);
@@ -413,7 +353,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             @Override
             public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
                 Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
-                if (column == 3 && value != null && value.toString().contains("[new:")) {
+                if (column == 3 && value != null && value.toString().contains("Unscanned:")) {
                     c.setForeground(Color.RED);
                 } else {
                     c.setForeground(isSelected ? table.getSelectionForeground() : table.getForeground());
