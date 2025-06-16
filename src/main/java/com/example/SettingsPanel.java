@@ -5,14 +5,32 @@ import javax.swing.border.Border;
 import javax.swing.border.TitledBorder;
 import java.awt.*;
 
+/**
+ * Lớp này là một "Factory" để tạo ra panel cho tab "Settings".
+ * Nó chỉ chịu trách nhiệm sắp xếp các thành phần giao diện (UI components)
+ * và không chứa bất kỳ logic nghiệp vụ nào. Các components (như JTextArea, JButton)
+ * được tạo và quản lý trong lớp chính (RecheckScanApiExtension).
+ */
 public class SettingsPanel {
 
+    /**
+     * Phương thức tĩnh tạo và trả về một JPanel đã được cấu hình hoàn chỉnh cho tab Settings.
+     * @param extensionArea Vùng nhập các extension cần loại trừ.
+     * @param outputPathField Trường nhập đường dẫn lưu file log/db.
+     * @param browseButton Nút để mở cửa sổ chọn file.
+     * @param highlightCheckBox Checkbox để bật/tắt highlight.
+     * @param noteCheckBox Checkbox để bật/tắt thêm note.
+     * @param autoBypassCheckBox Checkbox để bật/tắt tự động bypass.
+     * @param applyButton Nút để áp dụng và lưu cài đặt.
+     * @param totalLbl, scannedLbl, etc. Các nhãn để hiển thị thống kê.
+     * @return Một JPanel chứa toàn bộ giao diện của tab Settings.
+     */
     public static JPanel create(
             JTextArea  extensionArea,
             JTextField outputPathField,
             JButton    browseButton,
-            JCheckBox  highlightCheckBox, // FIXED: Changed from JButton
-            JCheckBox  noteCheckBox,      // FIXED: Changed from JButton
+            JCheckBox  highlightCheckBox,
+            JCheckBox  noteCheckBox,
             JCheckBox  autoBypassCheckBox,
             JButton    applyButton,
             JLabel     totalLbl,
@@ -21,30 +39,35 @@ public class SettingsPanel {
             JLabel     bypassLbl,
             JLabel     unverifiedLbl) {
 
-        /* ========= ROOT PANEL ========= */
+        /* ========= PANEL GỐC (ROOT) ========= */
         JPanel settingsPanel = new JPanel();
+        // Sử dụng BorderLayout để chia panel thành các khu vực CENTER, EAST, SOUTH.
         settingsPanel.setLayout(new BorderLayout(10, 10));
         settingsPanel.setBorder(BorderFactory.createEmptyBorder(15, 15, 15, 15));
 
-        /* ========= CENTER PANEL (MAIN CONTROLS) ========= */
+        /* ========= PANEL TRUNG TÂM (CENTER) - Chứa các điều khiển chính ========= */
         JPanel centerPanel = new JPanel();
+        // BoxLayout theo trục Y để các nhóm panel xếp chồng lên nhau theo chiều dọc.
         centerPanel.setLayout(new BoxLayout(centerPanel, BoxLayout.Y_AXIS));
 
-        // --- Project Settings Group ---
+        // --- Nhóm Cài đặt Project ---
         JPanel projectSettingsPanel = new JPanel();
         projectSettingsPanel.setLayout(new BoxLayout(projectSettingsPanel, BoxLayout.Y_AXIS));
-        projectSettingsPanel.setBorder(createTitledBorder("Project Settings"));
-        
-        JPanel outputPathPanel = new JPanel(new BorderLayout(5,0));
-        outputPathPanel.add(new JLabel("Log Output Path: "), BorderLayout.WEST);
+        projectSettingsPanel.setBorder(createTitledBorder("Project Settings")); // Tạo đường viền có tiêu đề
+
+        // Panel cho đường dẫn output và nút Browse
+        JPanel outputPathPanel = new JPanel(new BorderLayout(5, 0));
+        outputPathPanel.add(new JLabel("Log/DB Output Path: "), BorderLayout.WEST);
         outputPathPanel.add(outputPathField, BorderLayout.CENTER);
         outputPathPanel.add(browseButton, BorderLayout.EAST);
+        // Giới hạn chiều cao tối đa để không bị giãn ra quá lớn.
         outputPathPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, outputPathField.getPreferredSize().height));
         outputPathPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         projectSettingsPanel.add(outputPathPanel);
-        projectSettingsPanel.add(Box.createRigidArea(new Dimension(0, 5)));
+        projectSettingsPanel.add(Box.createRigidArea(new Dimension(0, 5))); // Thêm khoảng trống nhỏ
 
+        // Panel cho vùng nhập các extension loại trừ
         extensionArea.setRows(1);
         JScrollPane extScroll = new JScrollPane(extensionArea);
         extScroll.setMaximumSize(new Dimension(Integer.MAX_VALUE, extScroll.getPreferredSize().height + 10));
@@ -53,28 +76,30 @@ public class SettingsPanel {
         projectSettingsPanel.add(extScroll);
         
         centerPanel.add(projectSettingsPanel);
-        centerPanel.add(Box.createRigidArea(new Dimension(0, 10)));
+        centerPanel.add(Box.createRigidArea(new Dimension(0, 10))); // Thêm khoảng trống giữa các nhóm
 
-        // --- Controls Group ---
+        // --- Nhóm Controls ---
         JPanel controlsPanel = new JPanel();
         controlsPanel.setLayout(new BoxLayout(controlsPanel, BoxLayout.Y_AXIS));
         controlsPanel.setBorder(createTitledBorder("Controls"));
 
-        // FIXED: Add checkboxes directly to the panel
+        // Thêm trực tiếp các checkbox vào panel.
         controlsPanel.add(highlightCheckBox);
         controlsPanel.add(noteCheckBox);
         controlsPanel.add(autoBypassCheckBox);
         
         centerPanel.add(controlsPanel);
 
-        /* ========= EAST PANEL (STATISTICS) ========= */
+        /* ========= PANEL PHÍA ĐÔNG (EAST) - Chứa thống kê ========= */
         JPanel eastPanel = new JPanel(new BorderLayout());
         
         JPanel statsPanel = new JPanel();
         statsPanel.setBorder(createTitledBorder("Statistics"));
+        // GridLayout để các label thống kê được xếp đều nhau.
         statsPanel.setLayout(new GridLayout(5, 1, 0, 10));
         statsPanel.setPreferredSize(new Dimension(220, 200));
 
+        // Thiết lập font và border cho các label thống kê.
         Font statFont = totalLbl.getFont().deriveFont(Font.PLAIN, 15f);
         for (JLabel lbl : new JLabel[]{totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl}) {
             lbl.setFont(statFont);
@@ -85,13 +110,13 @@ public class SettingsPanel {
         eastPanel.add(statsPanel, BorderLayout.NORTH);
 
 
-        /* ========= SOUTH PANEL (APPLY BUTTON) ========= */
+        /* ========= PANEL PHÍA NAM (SOUTH) - Chứa nút Apply ========= */
         JPanel southPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         applyButton.setPreferredSize(new Dimension(150, 32));
         applyButton.setFont(applyButton.getFont().deriveFont(Font.BOLD, 13f));
         southPanel.add(applyButton);
         
-        /* ========= ASSEMBLE PANELS ========= */
+        /* ========= LẮP RÁP CÁC PANEL VÀO PANEL GỐC ========= */
         settingsPanel.add(centerPanel, BorderLayout.CENTER);
         settingsPanel.add(eastPanel, BorderLayout.EAST);
         settingsPanel.add(southPanel, BorderLayout.SOUTH);
@@ -99,6 +124,11 @@ public class SettingsPanel {
         return settingsPanel;
     }
 
+    /**
+     * Phương thức tiện ích để tạo một đường viền có tiêu đề (TitledBorder).
+     * @param title Tiêu đề của đường viền.
+     * @return một đối tượng Border đã được định dạng.
+     */
     private static Border createTitledBorder(String title) {
         TitledBorder border = BorderFactory.createTitledBorder(
                 BorderFactory.createEtchedBorder(), title
