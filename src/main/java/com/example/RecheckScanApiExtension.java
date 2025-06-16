@@ -90,7 +90,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 // 1. Bỏ qua các request không cần thiết
                 if (method.equals("OPTIONS")) return ResponseReceivedAction.continueWith(response);
                 ToolType sourceType = response.toolSource().toolType();
-                if (sourceType == ToolType.EXTENSIONS) return ResponseReceivedAction.continueWith(response);
+                if (sourceType == ToolType.EXTENSIONS || sourceType == ToolType.INTRUDER) return ResponseReceivedAction.continueWith(response);
 
                 boolean isScanner = sourceType == ToolType.SCANNER;
                 String host = request.httpService().host();
@@ -169,6 +169,10 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                                 String existingPath = tableModel.getValueAt(i, 2).toString();
                                 if (host.equals(existingHost) && path.equals(existingPath)) {
                                     tableModel.setValueAt(finalDisplayNote, i, 3);
+                                    // Nếu có param mới, reset trạng thái của Scanned
+                                    if (!addedParams.isEmpty()){
+                                        tableModel.setValueAt(false, i, 4);
+                                    }
                                     states[0] = Boolean.TRUE.equals(tableModel.getValueAt(i, 4)); // Scanned
                                     states[1] = Boolean.TRUE.equals(tableModel.getValueAt(i, 6)); // Bypass
                                     found = true;
