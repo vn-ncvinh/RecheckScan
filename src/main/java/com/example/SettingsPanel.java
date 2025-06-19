@@ -1,3 +1,4 @@
+// SettingsPanel.java
 package com.example;
 
 import javax.swing.*;
@@ -23,6 +24,7 @@ public class SettingsPanel {
      * @param autoBypassCheckBox Checkbox để bật/tắt tự động bypass.
      * @param applyButton Nút để áp dụng và lưu cài đặt.
      * @param totalLbl, scannedLbl, etc. Các nhãn để hiển thị thống kê.
+     * @param excludeStatusCodesField Trường nhập các status code cần loại trừ.
      * @return Một JPanel chứa toàn bộ giao diện của tab Settings.
      */
     public static JPanel create(
@@ -37,7 +39,8 @@ public class SettingsPanel {
             JLabel     scannedLbl,
             JLabel     rejectedLbl,
             JLabel     bypassLbl,
-            JLabel     unverifiedLbl) {
+            JLabel     unverifiedLbl,
+            JTextField excludeStatusCodesField) {
 
         /* ========= PANEL GỐC (ROOT) ========= */
         JPanel settingsPanel = new JPanel();
@@ -63,17 +66,30 @@ public class SettingsPanel {
         // Giới hạn chiều cao tối đa để không bị giãn ra quá lớn.
         outputPathPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, outputPathField.getPreferredSize().height));
         outputPathPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
-
         projectSettingsPanel.add(outputPathPanel);
-        projectSettingsPanel.add(Box.createRigidArea(new Dimension(0, 5))); // Thêm khoảng trống nhỏ
+        projectSettingsPanel.add(Box.createRigidArea(new Dimension(0, 5)));
 
-        // Panel cho vùng nhập các extension loại trừ
+        // Panel cho Exclude Extensions
+        JPanel excludeExtensionPanel = new JPanel(new BorderLayout(5, 0));
+        excludeExtensionPanel.add(new JLabel("Exclude Extensions (comma separated): "), BorderLayout.WEST);
         extensionArea.setRows(1);
         JScrollPane extScroll = new JScrollPane(extensionArea);
-        extScroll.setMaximumSize(new Dimension(Integer.MAX_VALUE, extScroll.getPreferredSize().height + 10));
+        extScroll.setMaximumSize(new Dimension(Integer.MAX_VALUE, extensionArea.getPreferredSize().height + 10));
         extScroll.setAlignmentX(Component.LEFT_ALIGNMENT);
-        
-        projectSettingsPanel.add(extScroll);
+        excludeExtensionPanel.add(extScroll, BorderLayout.CENTER);
+        excludeExtensionPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, excludeExtensionPanel.getPreferredSize().height));
+        excludeExtensionPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        projectSettingsPanel.add(excludeExtensionPanel);
+        projectSettingsPanel.add(Box.createRigidArea(new Dimension(0, 5)));
+
+        // Panel cho Exclude Status Codes
+        JPanel excludeStatusCodePanel = new JPanel(new BorderLayout(5, 0));
+        excludeStatusCodePanel.add(new JLabel("Exclude Status Codes (comma separated): "), BorderLayout.WEST);
+        excludeStatusCodePanel.add(excludeStatusCodesField, BorderLayout.CENTER);
+        excludeStatusCodePanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, excludeStatusCodesField.getPreferredSize().height));
+        excludeStatusCodePanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        projectSettingsPanel.add(excludeStatusCodePanel);
+        projectSettingsPanel.add(Box.createRigidArea(new Dimension(0, 5)));
         
         centerPanel.add(projectSettingsPanel);
         centerPanel.add(Box.createRigidArea(new Dimension(0, 10))); // Thêm khoảng trống giữa các nhóm

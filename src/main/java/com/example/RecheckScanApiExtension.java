@@ -23,7 +23,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.*;
 import java.util.List;
-import java.util.stream.Collectors;
 
 /**
  * Lớp chính của extension "Recheck Scan API".
@@ -47,6 +46,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     // Các biến lưu trữ cài đặt của người dùng, được tải từ tệp cấu hình.
     private String savedExtensions;
     private String savedOutputPath;
+    private String savedStatusCodes;
     private boolean highlightEnabled = false;
     private boolean noteEnabled = false;
     private boolean autoBypassNoParamGet = false;
@@ -103,8 +103,8 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
              */
             @Override
             public ResponseReceivedAction handleHttpResponseReceived(HttpResponseReceived response) {
-                // Lọc bỏ các API trả về 404 Not Found.
-                if (response.statusCode() == 404) {
+                // Lọc bỏ các API trả về status code bị loại trừ.
+                if (isExcludedStatusCode(response.statusCode())) {
                     return ResponseReceivedAction.continueWith(response);
                 }
 
@@ -411,6 +411,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         // --- Cài đặt Tab "Settings" ---
         JTextArea extensionArea = new JTextArea(savedExtensions != null ? savedExtensions : ".js,.svg,.css,.png,.jpg,.ttf,.ico,.html,.map,.gif,.woff2,.bcmap,.jpeg,.woff");
         JTextField outputPathField = new JTextField(savedOutputPath != null ? savedOutputPath : "");
+        JTextField excludeStatusCodesField = new JTextField(savedStatusCodes != null ? savedStatusCodes : "404,405");
         JButton browseButton = new JButton("Browse");
         browseButton.addActionListener(e -> {
             JFileChooser fileChooser = new JFileChooser();
@@ -438,6 +439,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         applyButton.addActionListener(e -> {
             savedExtensions = extensionArea.getText().trim();
             savedOutputPath = outputPathField.getText().trim();
+            savedStatusCodes = excludeStatusCodesField.getText().trim();
             saveSettings();
             // Khởi tạo lại CSDL nếu đường dẫn thay đổi.
             databaseManager.close();
@@ -445,7 +447,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             loadDataFromDb();
             JOptionPane.showMessageDialog(null, "Settings saved and project loaded from database.");
         });
-        tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightCheckBox, noteCheckBox, autoBypassCheckBox, applyButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl));
+        tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightCheckBox, noteCheckBox, autoBypassCheckBox, applyButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl, excludeStatusCodesField));
         
         // Đăng ký tab chính vào giao diện Burp.
         JPanel mainPanel = new JPanel(new BorderLayout());
@@ -489,7 +491,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
      */
     private boolean isExcludedByExtension(String path) {
         if (savedExtensions == null || savedExtensions.isBlank()) return false;
-        return Arrays.stream(savedExtensions.split(","))
+        return Arrays.stream(savedExtensions.replace(" ", "").split(","))
                      .map(String::trim)
                      .anyMatch(ext -> !ext.isEmpty() && path.toLowerCase().endsWith(ext));
     }
@@ -588,7 +590,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             File configFile = new File(System.getProperty("user.home"), "AppData/Local/RecheckScan/scan_api.txt");
             if (!configFile.getParentFile().exists()) configFile.getParentFile().mkdirs();
             try (BufferedWriter writer = new BufferedWriter(new FileWriter(configFile))) {
-                writer.write(savedExtensions + "\n" + highlightEnabled + "\n" + noteEnabled + "\n" + savedOutputPath + "\n" + autoBypassNoParamGet);
+                writer.write(savedExtensions + "\n" + highlightEnabled + "\n" + noteEnabled + "\n" + savedOutputPath + "\n" + autoBypassNoParamGet+ "\n" + savedStatusCodes);
             }
         } catch (IOException ex) {
             JOptionPane.showMessageDialog(null, "Failed to save settings: " + ex.getMessage());
@@ -608,10 +610,35 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 if (lines.size() >= 3) noteEnabled = Boolean.parseBoolean(lines.get(2).trim());
                 if (lines.size() >= 4) savedOutputPath = lines.get(3).trim();
                 if (lines.size() >= 5) autoBypassNoParamGet = Boolean.parseBoolean(lines.get(4).trim());
+                if (lines.size() >= 6) savedStatusCodes = lines.get(5).trim();
             }
         } catch (IOException e) {
             api.logging().logToError("Failed to load settings: " + e.getMessage());
         }
+    }
+    /**
+     * Kiểm tra xem một mã trạng thái HTTP nhất định có nên bị loại trừ dựa trên cài đặt của người dùng hay không.
+     * @param statusCode Mã trạng thái HTTP cần kiểm tra.
+     * @return true nếu mã trạng thái nằm trong danh sách bị loại trừ, ngược lại là false.
+     */
+    private boolean isExcludedStatusCode(int statusCode) {
+        if (savedStatusCodes == null || savedStatusCodes.isBlank()) {
+            return false;
+        }
+
+        Set<Integer> excludedCodes = new HashSet<>();
+        try {
+            for (String s : savedStatusCodes.split(",")) {
+                try {
+                    excludedCodes.add(Integer.parseInt(s.trim()));
+                } catch (NumberFormatException e) {
+                }
+            }
+        } catch (Exception e) {
+            return false;
+        }
+
+        return excludedCodes.contains(statusCode);
     }
     
     /**
