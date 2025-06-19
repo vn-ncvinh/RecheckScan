@@ -259,7 +259,8 @@ public class DatabaseManager {
     
     /**
      * Xử lý tính năng auto-bypass cho API GET không có tham số.
-     * Sử dụng ON CONFLICT để tránh ghi đè các API đã được đánh dấu `scanned` hoặc `rejected`.
+     * Sử dụng ON CONFLICT để tránh ghi đè các API đã được đánh dấu `scanned` hoặc `rejected`
+     * Đồng thời đảm bảo không đánh dấu bypass nếu API đó còn param chưa được scan
      *
      * @param method Phương thức HTTP (luôn là GET).
      * @param host   Host của API.
@@ -272,7 +273,8 @@ public class DatabaseManager {
             VALUES (?, ?, ?, '', '', 1)
             ON CONFLICT(host, path, method) DO UPDATE SET
                 is_bypassed = CASE
-                    WHEN api_log.is_scanned = 0 AND api_log.is_rejected = 0 THEN 1
+                    WHEN api_log.is_scanned = 0 AND api_log.is_rejected = 0 AND api_log.unscanned_params = ''
+                    THEN 1
                     ELSE api_log.is_bypassed
                 END,
                 last_seen = CURRENT_TIMESTAMP
