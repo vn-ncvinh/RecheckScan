@@ -3,10 +3,10 @@ name: Maven Package
 on:
   release:
     types: [created]
-  workflow_dispatch:  # Cho phép chạy thủ công
+  workflow_dispatch:
     inputs:
       create_release:
-        description: 'Tạo release sau khi build?'
+        description: 'Tạo release kèm file .jar?'
         required: false
         default: 'false'
         type: choice
@@ -18,7 +18,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Cần quyền này để tạo release nếu chọn
+      contents: write  # Cần để tạo release và upload asset
 
     steps:
       - uses: actions/checkout@v4
@@ -32,11 +32,17 @@ jobs:
       - name: Build with Maven
         run: mvn -B package --file pom.xml
 
-      - name: Optional Release Creation
+      # Tìm file .jar đầu ra
+      - name: Locate JAR file
+        id: locate_jar
+        run: |
+          JAR_PATH=$(find target -name "*.jar" | head -n 1)
+          echo "jar_file=$JAR_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release and Upload JAR
         if: github.event_name == 'workflow_dispatch' && inputs.create_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: manual-release-${{ github.run_number }}
           name: Manual Release ${{ github.run_number }}
-          draft: false
-          prerelease: false
+          files: ${{ steps.locate_jar.outputs.jar_file }}
