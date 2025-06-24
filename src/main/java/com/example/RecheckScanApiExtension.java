@@ -155,22 +155,21 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                             SwingUtilities.invokeLater(RecheckScanApiExtension.this::loadDataFromDb);
                         }).start();
                     }
-                }
+                    // Luôn kiểm tra trạng thái cuối cùng trong CSDL để áp dụng highlight và note.
+                    Object[] status = databaseManager.getApiStatus(method, host, path);
+                    if (status != null) {
+                        boolean isScanned = (boolean) status[0];
+                        boolean isBypassed = (boolean) status[2];
 
-                // Luôn kiểm tra trạng thái cuối cùng trong CSDL để áp dụng highlight và note.
-                Object[] status = databaseManager.getApiStatus(method, host, path);
-                if (status != null) {
-                    boolean isScanned = (boolean) status[0];
-                    boolean isBypassed = (boolean) status[2];
-
-                    if (highlightEnabled && (isScanned || isBypassed)) {
-                        response.annotations().setHighlightColor(HighlightColor.YELLOW);
-                    }
-                    if (noteEnabled) {
-                        if (isScanned) {
-                            response.annotations().setNotes("Scanned");
-                        } else if (isBypassed) {
-                            response.annotations().setNotes("Bypassed");
+                        if (highlightEnabled && (isScanned || isBypassed)) {
+                            response.annotations().setHighlightColor(HighlightColor.YELLOW);
+                        }
+                        if (noteEnabled) {
+                            if (isScanned) {
+                                response.annotations().setNotes("Scanned");
+                            } else if (isBypassed) {
+                                response.annotations().setNotes("Bypassed");
+                            }
                         }
                     }
                 }
