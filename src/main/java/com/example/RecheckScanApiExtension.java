@@ -135,6 +135,17 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 } 
                 // Trường hợp 2: Request từ các công cụ khác (Proxy, Repeater) và nằm trong scope.
                 else if (api.scope().isInScope(request.url()) && !isExcludedByExtension(path)) {
+                    // Nếu request từ Repeater, đánh dấu vào DB.
+                    if (sourceType == ToolType.REPEATER) {
+                        new Thread(() -> {
+                            boolean updated = databaseManager.updateRepeaterStatus(method, host, path);
+                            // Tải lại dữ liệu nếu trạng thái 'is_from_repeater' vừa được cập nhật.
+                            if (updated) {
+                                SwingUtilities.invokeLater(RecheckScanApiExtension.this::loadDataFromDb);
+                            }
+                        }).start();
+                    }
+
                     // Nhánh 2a: Tự động bypass cho GET không có tham số.
                     boolean isGetWithoutParams = "GET".equals(method) && requestParams.isEmpty();
                     if (autoBypassNoParamGet && isGetWithoutParams) {
@@ -239,7 +250,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
      * @param rowData Dữ liệu trả về từ DatabaseManager, bao gồm cả ID.
      */
     private void updateOrInsertTableRow(Object[] rowData) {
-        int dbId = (int) rowData[7];
+        int dbId = (int) rowData[8]; // Index của ID
         Integer modelRowIndex = findModelRowByDbId(dbId);
 
         if (modelRowIndex != null) { // API này đã tồn tại trên bảng -> cập nhật.
@@ -247,6 +258,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             tableModel.setValueAt(rowData[4], modelRowIndex, 4); // Cập nhật cột Scanned.
             tableModel.setValueAt(rowData[5], modelRowIndex, 5); // Cập nhật cột Rejected
             tableModel.setValueAt(rowData[6], modelRowIndex, 6); // Cập nhật cột Bypass
+            tableModel.setValueAt(rowData[7], modelRowIndex, 7); // Cập nhật cột Repeater
         } else { // API mới -> chèn vào đầu bảng.
             tableModel.insertRow(0, rowData);
             // Sau khi chèn, phải cập nhật lại toàn bộ map ánh xạ.
@@ -275,7 +287,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     private void remapAllIndices() {
         modelRowToDbId.clear();
         for (int i = 0; i < tableModel.getRowCount(); i++) {
-            Integer id = (Integer) tableModel.getValueAt(i, 7);
+            Integer id = (Integer) tableModel.getValueAt(i, 8); // Index của ID
             if (id != null) {
                 modelRowToDbId.put(i, id);
             }
@@ -286,28 +298,45 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
      * Khởi tạo toàn bộ giao diện người dùng của extension.
      */
     private void createUI() {
-        // Khởi tạo TableModel với các cột và định nghĩa kiểu dữ liệu.
-        tableModel = new DefaultTableModel(new Object[]{"Method", "Host", "Path", "Unscanned Params", "Scanned", "Rejected", "Bypass", "id"}, 0) {
+        // Khởi tạo TableModel với các cột
+        // Thứ tự rất quan trọng: Method, Host, Path, Unscanned, Scanned, Rejected, Bypass, Repeater(ẩn), id(ẩn)
+        tableModel = new DefaultTableModel(new Object[]{"Method", "Host", "Path", "Unscanned Params", "Scanned", "Rejected", "Bypass", "Repeater", "id"}, 0) {
             /**
-             * Xác định các ô có thể chỉnh sửa. Chỉ cho phép tick vào "Rejected" và "Bypass".
-             * Cột "Scanned" được quản lý tự động.
+             * Sửa đổi logic cho phép chỉnh sửa ô.
+             * - "Rejected": Chỉ có thể sửa nếu API chưa "Scanned" VÀ đã được gửi từ "Repeater".
+             * - "Bypass": Có thể sửa nếu API chưa "Scanned".
+             * - Các cột khác không thể sửa trực tiếp trên bảng.
              */
             @Override
             public boolean isCellEditable(int row, int column) {
-                 if (column == 5 || column == 6) { // Cột "Rejected" và "Bypass"
-                    boolean isScanned = Boolean.TRUE.equals(getValueAt(row, 4));
-                    return !isScanned;
+                boolean isScanned = Boolean.TRUE.equals(getValueAt(row, 4));
+                // Nếu đã được quét, không cho phép chỉnh sửa bất kỳ trạng thái nào.
+                if (isScanned) {
+                    return false;
                 }
+
+                // Logic cho cột "Rejected" (index 5)
+                if (column == 5) {
+                    // Lấy trạng thái từ cột "Repeater" (index 7)
+                    boolean isFromRepeater = Boolean.TRUE.equals(getValueAt(row, 7));
+                    return isFromRepeater; // Chỉ cho phép sửa nếu `isFromRepeater` là true.
+                }
+
+                // Logic cho cột "Bypass" (index 6)
+                if (column == 6) {
+                    return true;
+                }
+
                 return false;
             }
 
             /**
-             * Định nghĩa kiểu dữ liệu cho các cột để JTable có thể render đúng (e.g., checkbox cho boolean).
+             * Định nghĩa kiểu dữ liệu cho các cột để JTable có thể render đúng.
              */
             @Override
             public Class<?> getColumnClass(int columnIndex) {
-                if (columnIndex >= 4 && columnIndex <= 6) return Boolean.class;
-                if (columnIndex == 7) return Integer.class;
+                if (columnIndex >= 4 && columnIndex <= 7) return Boolean.class; // Các cột trạng thái (Scanned, Rejected, Bypass, Repeater)
+                if (columnIndex == 8) return Integer.class; // Cột ID
                 return String.class;
             }
 
@@ -326,12 +355,12 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 }
 
                 // Chỉ xử lý các cột checkbox trạng thái.
-                if (col >= 4 && col <= 6) {
-                    Integer id = (Integer) getValueAt(row, 7); // Lấy ID của dòng từ cột ẩn.
+                if (col == 5 || col == 6) {
+                    Integer id = (Integer) getValueAt(row, 8); // Lấy ID của dòng từ cột ẩn.
                     if (id != null) {
                         // Logic đảm bảo chỉ 1 trong 3 checkbox (Scanned, Rejected, Bypassed) được chọn tại một thời điểm.
                         if (Boolean.TRUE.equals(aValue)) {
-                            for (int i = 4; i <= 6; i++) {
+                            for (int i = 5; i <= 6; i++) {
                                 final boolean isChecked = (i == col);
                                 if (!isChecked) {
                                     super.setValueAt(false, row, i); // Bỏ tick các ô khác trên UI.
@@ -353,7 +382,6 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                         } else {
                              // Nếu người dùng bỏ tick một ô, cập nhật trạng thái đó trong CSDL.
                             String dbColumn = switch (col) {
-                                case 4 -> "is_scanned";
                                 case 5 -> "is_rejected";
                                 case 6 -> "is_bypassed";
                                 default -> null;
@@ -373,7 +401,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
         // --- Cài đặt Tab "Unscanned" ---
         JTable unscannedTable = createCommonTable();
-        hideIdColumn(unscannedTable); // Ẩn cột ID.
+        setupHiddenColumns(unscannedTable); // Ẩn các cột cần thiết (Repeater, id)
         final TableRowSorter<DefaultTableModel> unscannedSorter = new TableRowSorter<>(tableModel);
         unscannedTable.setRowSorter(unscannedSorter);
 
@@ -397,7 +425,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
         // --- Cài đặt Tab "Logs" ---
         JTable logsTable = createCommonTable();
-        hideIdColumn(logsTable);
+        setupHiddenColumns(logsTable); // Ẩn các cột cần thiết (Repeater, id)
         final TableRowSorter<DefaultTableModel> logsSorter = new TableRowSorter<>(tableModel);
         logsTable.setRowSorter(logsSorter);
         JButton logsRefreshButton = new JButton("Refresh");
@@ -458,10 +486,18 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     }
 
     /**
-     * Helper method để ẩn cột ID khỏi giao diện người dùng.
+     * Helper method để ẩn các cột không cần thiết khỏi giao diện người dùng.
+     * @param table Bảng cần thao tác.
      */
-    private void hideIdColumn(JTable table) {
-        TableColumn idColumn = table.getColumnModel().getColumn(7);
+    private void setupHiddenColumns(JTable table) {
+        // Ẩn cột "Repeater" (index 7)
+        TableColumn repeaterColumn = table.getColumnModel().getColumn(7);
+        repeaterColumn.setMinWidth(0);
+        repeaterColumn.setMaxWidth(0);
+        repeaterColumn.setWidth(0);
+
+        // Ẩn cột "id" (index 8)
+        TableColumn idColumn = table.getColumnModel().getColumn(8);
         idColumn.setMinWidth(0);
         idColumn.setMaxWidth(0);
         idColumn.setWidth(0);
@@ -478,7 +514,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         for (int i = 0; i < rows.size(); i++) {
             Object[] rowData = rows.get(i);
             tableModel.addRow(rowData);
-            modelRowToDbId.put(i, (Integer) rowData[7]);
+            modelRowToDbId.put(i, (Integer) rowData[8]); // Index của ID
         }
         updateStats();
     }
@@ -518,7 +554,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             @Override
             public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
                 Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
-                if (column == 3 && value != null) {
+                if (column == 3 && value != null && !((String)value).isEmpty()) {
                     c.setForeground(Color.RED);
                 } else {
                     c.setForeground(isSelected ? table.getSelectionForeground() : table.getForeground());
