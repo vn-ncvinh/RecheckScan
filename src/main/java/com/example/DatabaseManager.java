@@ -101,6 +101,7 @@ public class DatabaseManager {
                 is_scanned BOOLEAN DEFAULT 0,              -- Trạng thái: đã quét hết các param (1) hay chưa (0).
                 is_rejected BOOLEAN DEFAULT 0,             -- Trạng thái: người dùng đã từ chối quét (1) hay chưa (0).
                 is_bypassed BOOLEAN DEFAULT 0,             -- Trạng thái: được tự động bỏ qua (1) hay chưa (0).
+                is_from_repeater BOOLEAN DEFAULT 0,        -- Trạng thái: đã được gửi từ Repeater (1) hay chưa (0).
                 last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- Dấu thời gian lần cuối thấy API này.
                 UNIQUE(host, path, method)                 -- Ràng buộc duy nhất: không thể có hai dòng trùng cả host, path và method.
             );
@@ -118,7 +119,7 @@ public class DatabaseManager {
      */
     public List<Object[]> loadApiData() {
         List<Object[]> rows = new ArrayList<>();
-        String sql = "SELECT id, method, host, path, unscanned_params, scanned_params, is_scanned, is_rejected, is_bypassed FROM api_log ORDER BY id DESC";
+        String sql = "SELECT id, method, host, path, unscanned_params, scanned_params, is_scanned, is_rejected, is_bypassed, is_from_repeater FROM api_log ORDER BY id DESC";
         try (Statement stmt = connection.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
                 String unscanned = rs.getString("unscanned_params");
@@ -137,6 +138,7 @@ public class DatabaseManager {
                         rs.getBoolean("is_scanned"),
                         rs.getBoolean("is_rejected"),
                         rs.getBoolean("is_bypassed"),
+                        rs.getBoolean("is_from_repeater"),
                         rs.getInt("id")
                 });
             }
@@ -286,6 +288,29 @@ public class DatabaseManager {
             return stmt.executeUpdate() > 0;
         } catch (SQLException e) {
             api.logging().logToError("Error during autoBypassApi: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * Đánh dấu một API đã được gửi từ Repeater.
+     * Chỉ cập nhật nếu trạng thái hiện tại là chưa được đánh dấu để tránh reload UI không cần thiết.
+     *
+     * @param method Phương thức HTTP.
+     * @param host   Host của API.
+     * @param path   Path của API.
+     * @return true nếu có sự thay đổi trong CSDL, ngược lại false.
+     */
+    public synchronized boolean updateRepeaterStatus(String method, String host, String path) {
+        String sql = "UPDATE api_log SET is_from_repeater = 1, last_seen = CURRENT_TIMESTAMP WHERE host = ? AND path = ? AND method = ? AND is_from_repeater = 0";
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, host);
+            stmt.setString(2, path);
+            stmt.setString(3, method);
+            int affectedRows = stmt.executeUpdate();
+            return affectedRows > 0;
+        } catch (SQLException e) {
+            api.logging().logToError("Error during updateRepeaterStatus: " + e.getMessage(), e);
             return false;
         }
     }
