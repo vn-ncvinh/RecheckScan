@@ -36,7 +36,7 @@ jobs:
       - name: Locate JAR file
         id: locate_jar
         run: |
-          JAR_PATH=$(find target -name "*.jar" | head -n 1)
+          JAR_PATH=$(find target -name "burp-recheck-scan*.jar" | head -n 1)
           echo "jar_file=$JAR_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Create Release and Upload JAR
