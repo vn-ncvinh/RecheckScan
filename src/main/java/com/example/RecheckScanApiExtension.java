@@ -467,12 +467,27 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             savedExtensions = extensionArea.getText().trim();
             savedOutputPath = outputPathField.getText().trim();
             savedStatusCodes = excludeStatusCodesField.getText().trim();
+            autoBypassNoParamGet = autoBypassCheckBox.isSelected();
             saveSettings();
-            // Khởi tạo lại CSDL nếu đường dẫn thay đổi.
+
+            // Khởi tạo lại CSDL trước để đảm bảo đang làm việc với đúng file
             databaseManager.close();
             databaseManager.initialize(savedOutputPath);
-            loadDataFromDb();
-            JOptionPane.showMessageDialog(null, "Settings saved and project loaded from database.");
+
+            // *** Áp dụng bypass cho dữ liệu cũ ***
+            if (autoBypassNoParamGet) {
+                // Chạy trong một luồng riêng để không làm treo giao diện
+                new Thread(() -> {
+                    databaseManager.applyAutoBypassToOldRecords();
+                    // Tải lại dữ liệu trên luồng giao diện sau khi cập nhật xong
+                    SwingUtilities.invokeLater(this::loadDataFromDb);
+                }).start();
+            } else {
+                // Nếu không bật, chỉ cần tải lại dữ liệu như bình thường
+                loadDataFromDb();
+            }
+
+            JOptionPane.showMessageDialog(null, "Settings applied and project reloaded from database.");
         });
         tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightCheckBox, noteCheckBox, autoBypassCheckBox, applyButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl, excludeStatusCodesField));
         

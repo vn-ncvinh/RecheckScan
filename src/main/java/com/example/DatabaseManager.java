@@ -337,6 +337,37 @@ public class DatabaseManager {
         if (set == null || set.isEmpty()) return "";
         return set.stream().sorted().collect(Collectors.joining("|"));
     }
+
+    /**
+     * Áp dụng quy tắc auto-bypass cho tất cả các bản ghi cũ phù hợp trong CSDL.
+     * Được gọi khi người dùng nhấn Apply trong Settings với tùy chọn auto-bypass được bật.
+     *
+     * @return Số lượng dòng đã được cập nhật.
+     */
+    public synchronized int applyAutoBypassToOldRecords() {
+        String sql = """
+            UPDATE api_log
+            SET
+                is_bypassed = 1,
+                last_seen = CURRENT_TIMESTAMP
+            WHERE
+                method = 'GET'
+                AND (unscanned_params IS NULL OR unscanned_params = '')
+                AND is_scanned = 0
+                AND is_rejected = 0
+                AND is_bypassed = 0
+            """;
+        try (Statement stmt = connection.createStatement()) {
+            int affectedRows = stmt.executeUpdate(sql);
+            if (affectedRows > 0) {
+                api.logging().logToOutput("Retroactively bypassed " + affectedRows + " old GET APIs without parameters.");
+            }
+            return affectedRows;
+        } catch (SQLException e) {
+            api.logging().logToError("Error during retroactive auto-bypass: " + e.getMessage(), e);
+            return 0;
+        }
+    }
     
     /**
      * Cập nhật một cột trạng thái boolean (is_scanned, is_rejected, is_bypassed) cho một API.
