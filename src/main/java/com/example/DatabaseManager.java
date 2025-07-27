@@ -351,8 +351,7 @@ public class DatabaseManager {
                 is_bypassed = 1,
                 last_seen = CURRENT_TIMESTAMP
             WHERE
-                method = 'GET'
-                AND (unscanned_params IS NULL OR unscanned_params = '')
+                (unscanned_params IS NULL OR unscanned_params = '')
                 AND is_scanned = 0
                 AND is_rejected = 0
                 AND is_bypassed = 0

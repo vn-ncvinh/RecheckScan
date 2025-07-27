@@ -49,7 +49,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     private String savedStatusCodes;
     private boolean highlightEnabled = false;
     private boolean noteEnabled = false;
-    private boolean autoBypassNoParamGet = false;
+    private boolean autoBypassNoParam = false;
 
     /**
      * Model cho JTable, chứa dữ liệu API được hiển thị trên giao diện.
@@ -146,9 +146,8 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                         }).start();
                     }
 
-                    // Nhánh 2a: Tự động bypass cho GET không có tham số.
-                    boolean isGetWithoutParams = "GET".equals(method) && requestParams.isEmpty();
-                    if (autoBypassNoParamGet && isGetWithoutParams) {
+                    // Nhánh 2a: Tự động bypass cho API không có tham số.
+                    if (requestParams.isEmpty()) {
                         new Thread(() -> {
                             boolean updated = databaseManager.autoBypassApi(method, host, path);
                             if (updated) {
@@ -457,9 +456,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             noteEnabled = noteCheckBox.isSelected();
             saveSettings();
         });
-        JCheckBox autoBypassCheckBox = new JCheckBox("Auto-bypass GET APIs without params", autoBypassNoParamGet);
+        JCheckBox autoBypassCheckBox = new JCheckBox("Auto-bypass APIs without params", autoBypassNoParam);
         autoBypassCheckBox.addActionListener(e -> {
-            autoBypassNoParamGet = autoBypassCheckBox.isSelected();
+            autoBypassNoParam = autoBypassCheckBox.isSelected();
             saveSettings();
         });
         JButton applyButton = new JButton("Apply");
@@ -467,7 +466,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             savedExtensions = extensionArea.getText().trim();
             savedOutputPath = outputPathField.getText().trim();
             savedStatusCodes = excludeStatusCodesField.getText().trim();
-            autoBypassNoParamGet = autoBypassCheckBox.isSelected();
+            autoBypassNoParam = autoBypassCheckBox.isSelected();
             saveSettings();
 
             // Khởi tạo lại CSDL trước để đảm bảo đang làm việc với đúng file
@@ -475,7 +474,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             databaseManager.initialize(savedOutputPath);
 
             // *** Áp dụng bypass cho dữ liệu cũ ***
-            if (autoBypassNoParamGet) {
+            if (autoBypassNoParam) {
                 // Chạy trong một luồng riêng để không làm treo giao diện
                 new Thread(() -> {
                     databaseManager.applyAutoBypassToOldRecords();
@@ -640,7 +639,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             File configFile = new File(System.getProperty("user.home"), "AppData/Local/RecheckScan/scan_api.txt");
             if (!configFile.getParentFile().exists()) configFile.getParentFile().mkdirs();
             try (BufferedWriter writer = new BufferedWriter(new FileWriter(configFile))) {
-                writer.write(savedExtensions + "\n" + highlightEnabled + "\n" + noteEnabled + "\n" + savedOutputPath + "\n" + autoBypassNoParamGet+ "\n" + savedStatusCodes);
+                writer.write(savedExtensions + "\n" + highlightEnabled + "\n" + noteEnabled + "\n" + savedOutputPath + "\n" + autoBypassNoParam+ "\n" + savedStatusCodes);
             }
         } catch (IOException ex) {
             JOptionPane.showMessageDialog(null, "Failed to save settings: " + ex.getMessage());
@@ -659,7 +658,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 if (lines.size() >= 2) highlightEnabled = Boolean.parseBoolean(lines.get(1).trim());
                 if (lines.size() >= 3) noteEnabled = Boolean.parseBoolean(lines.get(2).trim());
                 if (lines.size() >= 4) savedOutputPath = lines.get(3).trim();
-                if (lines.size() >= 5) autoBypassNoParamGet = Boolean.parseBoolean(lines.get(4).trim());
+                if (lines.size() >= 5) autoBypassNoParam = Boolean.parseBoolean(lines.get(4).trim());
                 if (lines.size() >= 6) savedStatusCodes = lines.get(5).trim();
             }
         } catch (IOException e) {
