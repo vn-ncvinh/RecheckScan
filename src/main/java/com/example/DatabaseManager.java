@@ -47,14 +47,18 @@ public class DatabaseManager {
         try {
             // Nạp driver JDBC cho SQLite.
             Class.forName("org.sqlite.JDBC");
-            File dbFile = new File(dbPath);
+            
             // Đảm bảo thư mục cha tồn tại trước khi tạo tệp CSDL.
-            if (!dbFile.getParentFile().exists()) {
-                dbFile.getParentFile().mkdirs();
+            File dbFile = new File(dbPath);
+            File parentDir = dbFile.getParentFile();
+            if (parentDir != null && !parentDir.exists()) {
+                parentDir.mkdirs();
             }
+            
             // Tạo kết nối đến tệp SQLite.
             connection = DriverManager.getConnection("jdbc:sqlite:" + this.dbPath);
             api.logging().logToOutput("Successfully connected to SQLite database: " + this.dbPath);
+            
             // Tạo bảng nếu nó chưa tồn tại.
             createTableIfNotExists();
         } catch (SQLException | ClassNotFoundException e) {
@@ -78,8 +82,8 @@ public class DatabaseManager {
                     : savedOutputPath;
             return path.toLowerCase().endsWith(".db") ? path : path + ".db";
         }
-        // Đường dẫn mặc định trong thư mục Local AppData của người dùng.
-        return new File(System.getProperty("user.home"), "AppData/Local/RecheckScan/scan_api.db").getAbsolutePath();
+        // Đường dẫn mặc định trong thư mục Temp của Windows.
+        return new File(System.getProperty("java.io.tmpdir"), "RecheckScan/scan_api.db").getAbsolutePath();
     }
 
     /**

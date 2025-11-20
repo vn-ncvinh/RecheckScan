@@ -44,9 +44,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     private DatabaseManager databaseManager;
 
     // Các biến lưu trữ cài đặt của người dùng, được tải từ tệp cấu hình.
-    private String savedExtensions;
+    private String exclude_extensions;
     private String savedOutputPath;
-    private String savedStatusCodes;
+    private String exclude_status_code;
     private boolean highlightEnabled = false;
     private boolean noteEnabled = false;
     private boolean autoBypassNoParam = false;
@@ -435,9 +435,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         tabs.addTab("Logs", logsPanel);
 
         // --- Cài đặt Tab "Settings" ---
-        JTextArea extensionArea = new JTextArea(savedExtensions != null ? savedExtensions : ".js,.svg,.css,.png,.jpg,.ttf,.ico,.html,.map,.gif,.woff2,.bcmap,.jpeg,.woff");
+        JTextArea extensionArea = new JTextArea(exclude_extensions != null ? exclude_extensions : ".js,.svg,.css,.png,.jpg,.ttf,.ico,.html,.map,.gif,.woff2,.bcmap,.jpeg,.woff");
         JTextField outputPathField = new JTextField(savedOutputPath != null ? savedOutputPath : "");
-        JTextField excludeStatusCodesField = new JTextField(savedStatusCodes != null ? savedStatusCodes : "404,405");
+        JTextField excludeStatusCodesField = new JTextField(exclude_status_code != null ? exclude_status_code : "404,405");
         JButton browseButton = new JButton("Browse");
         browseButton.addActionListener(e -> {
             JFileChooser fileChooser = new JFileChooser();
@@ -463,9 +463,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         });
         JButton applyButton = new JButton("Apply");
         applyButton.addActionListener(e -> {
-            savedExtensions = extensionArea.getText().trim();
+            exclude_extensions = extensionArea.getText().trim();
             savedOutputPath = outputPathField.getText().trim();
-            savedStatusCodes = excludeStatusCodesField.getText().trim();
+            exclude_status_code = excludeStatusCodesField.getText().trim();
             autoBypassNoParam = autoBypassCheckBox.isSelected();
             saveSettings();
 
@@ -539,8 +539,8 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
      * @return true nếu bị loại trừ.
      */
     private boolean isExcludedByExtension(String path) {
-        if (savedExtensions == null || savedExtensions.isBlank()) return false;
-        return Arrays.stream(savedExtensions.replace(" ", "").split(","))
+        if (exclude_extensions == null || exclude_extensions.isBlank()) return false;
+        return Arrays.stream(exclude_extensions.replace(" ", "").split(","))
                      .map(String::trim)
                      .anyMatch(ext -> !ext.isEmpty() && path.toLowerCase().endsWith(ext));
     }
@@ -632,14 +632,18 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     }
     
     /**
-     * Lưu các cài đặt hiện tại vào tệp cấu hình.
+     * Lưu các cài đặt hiện tại vào tệp cấu hình (recheckscan.ini cùng folder với BurpSuite).
      */
     private void saveSettings() {
         try {
-            File configFile = new File(System.getProperty("user.home"), "AppData/Local/RecheckScan/scan_api.txt");
-            if (!configFile.getParentFile().exists()) configFile.getParentFile().mkdirs();
+            File configFile = new File("recheckscan.ini");
             try (BufferedWriter writer = new BufferedWriter(new FileWriter(configFile))) {
-                writer.write(savedExtensions + "\n" + highlightEnabled + "\n" + noteEnabled + "\n" + savedOutputPath + "\n" + autoBypassNoParam+ "\n" + savedStatusCodes);
+                writer.write("exclude_extensions=" + exclude_extensions + "\n");
+                writer.write("highlightEnabled=" + highlightEnabled + "\n");
+                writer.write("noteEnabled=" + noteEnabled + "\n");
+                writer.write("outputPath=" + savedOutputPath + "\n");
+                writer.write("autoBypassNoParam=" + autoBypassNoParam + "\n");
+                writer.write("exclude_status_code=" + exclude_status_code + "\n");
             }
         } catch (IOException ex) {
             JOptionPane.showMessageDialog(null, "Failed to save settings: " + ex.getMessage());
@@ -647,19 +651,42 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     }
 
     /**
-     * Tải các cài đặt từ tệp cấu hình khi khởi động.
+     * Tải các cài đặt từ tệp cấu hình (recheckscan.ini cùng folder với BurpSuite) khi khởi động.
      */
     private void loadSavedSettings() {
         try {
-            File configFile = new File(System.getProperty("user.home"), "AppData/Local/RecheckScan/scan_api.txt");
+            File configFile = new File("recheckscan.ini");
             if (configFile.exists()) {
                 List<String> lines = Files.readAllLines(configFile.toPath());
-                if (!lines.isEmpty()) savedExtensions = lines.get(0).trim();
-                if (lines.size() >= 2) highlightEnabled = Boolean.parseBoolean(lines.get(1).trim());
-                if (lines.size() >= 3) noteEnabled = Boolean.parseBoolean(lines.get(2).trim());
-                if (lines.size() >= 4) savedOutputPath = lines.get(3).trim();
-                if (lines.size() >= 5) autoBypassNoParam = Boolean.parseBoolean(lines.get(4).trim());
-                if (lines.size() >= 6) savedStatusCodes = lines.get(5).trim();
+                for (String line : lines) {
+                    if (line.trim().isEmpty() || line.startsWith("#")) continue;
+                    String[] parts = line.split("=", 2);
+                    if (parts.length != 2) continue;
+                    
+                    String key = parts[0].trim();
+                    String value = parts[1].trim();
+                    
+                    switch (key) {
+                        case "exclude_extensions":
+                            exclude_extensions = value;
+                            break;
+                        case "highlightEnabled":
+                            highlightEnabled = Boolean.parseBoolean(value);
+                            break;
+                        case "noteEnabled":
+                            noteEnabled = Boolean.parseBoolean(value);
+                            break;
+                        case "outputPath":
+                            savedOutputPath = value;
+                            break;
+                        case "autoBypassNoParam":
+                            autoBypassNoParam = Boolean.parseBoolean(value);
+                            break;
+                        case "exclude_status_code":
+                            exclude_status_code = value;
+                            break;
+                    }
+                }
             }
         } catch (IOException e) {
             api.logging().logToError("Failed to load settings: " + e.getMessage());
@@ -671,13 +698,13 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
      * @return true nếu mã trạng thái nằm trong danh sách bị loại trừ, ngược lại là false.
      */
     private boolean isExcludedStatusCode(int statusCode) {
-        if (savedStatusCodes == null || savedStatusCodes.isBlank()) {
+        if (exclude_status_code == null || exclude_status_code.isBlank()) {
             return false;
         }
 
         Set<Integer> excludedCodes = new HashSet<>();
         try {
-            for (String s : savedStatusCodes.split(",")) {
+            for (String s : exclude_status_code.split(",")) {
                 try {
                     excludedCodes.add(Integer.parseInt(s.trim()));
                 } catch (NumberFormatException e) {
