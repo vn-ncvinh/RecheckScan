@@ -20,7 +20,6 @@ import java.io.StringReader;
 import java.io.StringWriter;
 import java.util.*;
 import java.util.List;
-import java.util.Properties;
 
 /**
  * Lớp chính của extension "Recheck Scan API".
@@ -177,6 +176,8 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                                 response.annotations().setNotes("Scanned");
                             } else if (isBypassed) {
                                 response.annotations().setNotes("Bypassed");
+                            } else {
+                                response.annotations().setNotes("Rejected");
                             }
                         }
                     }
