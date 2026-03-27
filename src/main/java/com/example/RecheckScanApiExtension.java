@@ -167,6 +167,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                     if (status != null) {
                         boolean isScanned = (boolean) status[0];
                         boolean isBypassed = (boolean) status[2];
+                        boolean isRejected = (boolean) status[1];
 
                         if (highlightEnabled && (isScanned || isBypassed)) {
                             response.annotations().setHighlightColor(HighlightColor.YELLOW);
@@ -176,7 +177,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                                 response.annotations().setNotes("Scanned");
                             } else if (isBypassed) {
                                 response.annotations().setNotes("Bypassed");
-                            } else {
+                            } else if (isRejected) {
                                 response.annotations().setNotes("Rejected");
                             }
                         }
