@@ -16,6 +16,7 @@ import javax.swing.table.*;
 import java.awt.*;
 import java.awt.datatransfer.StringSelection;
 import java.awt.event.ActionEvent;
+<<<<<<< HEAD
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.util.*;
@@ -23,6 +24,12 @@ import java.util.List;
 import java.util.Properties;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
+=======
+import java.io.StringReader;
+import java.io.StringWriter;
+import java.util.*;
+import java.util.List;
+>>>>>>> 82b979bd66d565af819e7bec45ac721fd890cf75
 
 /**
  * Lớp chính của extension "Recheck Scan API".
@@ -173,6 +180,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                     if (status != null) {
                         boolean isScanned = (boolean) status[0];
                         boolean isBypassed = (boolean) status[2];
+                        boolean isRejected = (boolean) status[1];
 
                         if (highlightEnabled && (isScanned || isBypassed)) {
                             response.annotations().setHighlightColor(HighlightColor.YELLOW);
@@ -182,6 +190,8 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                                 response.annotations().setNotes("Scanned");
                             } else if (isBypassed) {
                                 response.annotations().setNotes("Bypassed");
+                            } else if (isRejected) {
+                                response.annotations().setNotes("Rejected");
                             }
                         }
                     }
