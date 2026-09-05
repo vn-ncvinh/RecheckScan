@@ -49,10 +49,12 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     private String savedOutputPath;
     private String exclude_status_code;
     private String path_parameter_rules;
+    private String ignore_path_parameter_rules;
     private boolean highlightEnabled = false;
     private boolean noteEnabled = false;
     private boolean autoBypassNoParam = false;
     private List<PathParameterRule> compiledPathParameterRules = new ArrayList<>();
+    private List<Pattern> compiledIgnorePathParameterRules = new ArrayList<>();
 
     /**
      * Model cho JTable, chứa dữ liệu API được hiển thị trên giao diện.
@@ -446,6 +448,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         JTextField outputPathField = new JTextField(savedOutputPath != null ? savedOutputPath : "");
         JTextField excludeStatusCodesField = new JTextField(exclude_status_code != null ? exclude_status_code : "404,405");
         JTextArea pathParameterRulesArea = new JTextArea(path_parameter_rules != null ? path_parameter_rules : "");
+        JTextArea ignorePathParameterRulesArea = new JTextArea(ignore_path_parameter_rules != null ? ignore_path_parameter_rules : "");
         JButton browseButton = new JButton("Browse");
         browseButton.addActionListener(e -> {
             JFileChooser fileChooser = new JFileChooser();
@@ -475,7 +478,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             savedOutputPath = outputPathField.getText().trim();
             exclude_status_code = excludeStatusCodesField.getText().trim();
             path_parameter_rules = pathParameterRulesArea.getText().trim();
+            ignore_path_parameter_rules = ignorePathParameterRulesArea.getText().trim();
             compiledPathParameterRules = compilePathParameterRules(path_parameter_rules);
+            compiledIgnorePathParameterRules = compileIgnorePathParameterRules(ignore_path_parameter_rules);
             autoBypassNoParam = autoBypassCheckBox.isSelected();
             saveSettings();
 
@@ -503,7 +508,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
             JOptionPane.showMessageDialog(null, "Settings applied and project reloaded from database.");
         });
-        tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightCheckBox, noteCheckBox, autoBypassCheckBox, applyButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl, excludeStatusCodesField, pathParameterRulesArea));
+        tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightCheckBox, noteCheckBox, autoBypassCheckBox, applyButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl, excludeStatusCodesField, pathParameterRulesArea, ignorePathParameterRulesArea));
         
         // Đăng ký tab chính vào giao diện Burp.
         JPanel mainPanel = new JPanel(new BorderLayout());
@@ -565,7 +570,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
      * Ví dụ: /api/report/1684050854912458752/list -> /api/report/{id}/list.
      */
     private String normalizePath(String path) {
-        if (path == null || path.isBlank() || compiledPathParameterRules.isEmpty()) {
+        if (path == null || path.isBlank() || compiledPathParameterRules.isEmpty() || isIgnoredByPathParameterRules(path)) {
             return path;
         }
 
@@ -613,6 +618,32 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             }
         }
         return rules;
+    }
+
+    private List<Pattern> compileIgnorePathParameterRules(String rulesText) {
+        List<Pattern> rules = new ArrayList<>();
+        if (rulesText == null || rulesText.isBlank()) {
+            return rules;
+        }
+
+        for (String rawLine : rulesText.split("\\R")) {
+            String line = rawLine.trim();
+            if (line.isEmpty() || line.startsWith("#")) {
+                continue;
+            }
+
+            try {
+                rules.add(Pattern.compile(line));
+            } catch (PatternSyntaxException e) {
+                api.logging().logToError("Invalid ignore path parameter regex rule: " + line + " - " + e.getMessage());
+            }
+        }
+        return rules;
+    }
+
+    private boolean isIgnoredByPathParameterRules(String path) {
+        return compiledIgnorePathParameterRules.stream()
+                .anyMatch(rule -> rule.matcher(path).find());
     }
 
     private String normalizePlaceholder(String placeholder) {
@@ -826,6 +857,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             props.setProperty("autoBypassNoParam", String.valueOf(autoBypassNoParam));
             props.setProperty("exclude_status_code", valueOrEmpty(exclude_status_code));
             props.setProperty("path_parameter_rules", valueOrEmpty(path_parameter_rules));
+            props.setProperty("ignore_path_parameter_rules", valueOrEmpty(ignore_path_parameter_rules));
             
             StringWriter writer = new StringWriter();
             props.store(writer, null);
@@ -869,11 +901,16 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 autoBypassNoParam = Boolean.parseBoolean(props.getProperty("autoBypassNoParam", "false"));
                 exclude_status_code = props.getProperty("exclude_status_code", "");
                 path_parameter_rules = props.getProperty("path_parameter_rules", "");
+                ignore_path_parameter_rules = props.getProperty("ignore_path_parameter_rules", "");
             }
             if (path_parameter_rules == null) {
                 path_parameter_rules = "";
             }
+            if (ignore_path_parameter_rules == null) {
+                ignore_path_parameter_rules = "";
+            }
             compiledPathParameterRules = compilePathParameterRules(path_parameter_rules);
+            compiledIgnorePathParameterRules = compileIgnorePathParameterRules(ignore_path_parameter_rules);
         } catch (Exception e) {
             api.logging().logToError("Failed to load settings: " + e.getMessage());
         }

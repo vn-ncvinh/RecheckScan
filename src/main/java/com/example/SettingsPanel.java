@@ -25,6 +25,7 @@ public class SettingsPanel {
      * @param applyButton Nút để áp dụng và lưu cài đặt.
      * @param totalLbl, scannedLbl, etc. Các nhãn để hiển thị thống kê.
      * @param excludeStatusCodesField Trường nhập các status code cần loại trừ.
+     * @param ignorePathParameterRulesArea Vùng nhập các regex path không áp dụng rule parameter.
      * @return Một JPanel chứa toàn bộ giao diện của tab Settings.
      */
     public static JPanel create(
@@ -41,7 +42,8 @@ public class SettingsPanel {
             JLabel     bypassLbl,
             JLabel     unverifiedLbl,
             JTextField excludeStatusCodesField,
-            JTextArea  pathParameterRulesArea) {
+            JTextArea  pathParameterRulesArea,
+            JTextArea  ignorePathParameterRulesArea) {
 
         /* ========= PANEL GỐC (ROOT) ========= */
         JPanel settingsPanel = new JPanel();
@@ -110,7 +112,26 @@ public class SettingsPanel {
         pathParameterRulesPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
         projectSettingsPanel.add(pathParameterRulesPanel);
         projectSettingsPanel.add(Box.createRigidArea(new Dimension(0, 5)));
-        
+
+        // Panel cho rule bỏ qua normalize path parameter
+        JPanel ignorePathParameterRulesPanel = new JPanel(new BorderLayout(5, 0));
+        ignorePathParameterRulesPanel.add(new JLabel("Ignore URL Path Parameter Rules: "), BorderLayout.WEST);
+        ignorePathParameterRulesArea.setRows(3);
+        ignorePathParameterRulesArea.setToolTipText("One regex per line. Matching paths will not be normalized by URL Path Parameter Rules.");
+        JScrollPane ignorePathRuleScroll = new JScrollPane(ignorePathParameterRulesArea);
+        JLabel ignorePathRuleHelpLabel = new JLabel("One regex per line. Example: ^/api/reports/[0-9]{4}/summary$");
+        ignorePathRuleHelpLabel.setFont(ignorePathRuleHelpLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        ignorePathRuleHelpLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
+
+        JPanel ignorePathRuleInputPanel = new JPanel(new BorderLayout(0, 3));
+        ignorePathRuleInputPanel.add(ignorePathRuleScroll, BorderLayout.CENTER);
+        ignorePathRuleInputPanel.add(ignorePathRuleHelpLabel, BorderLayout.SOUTH);
+        ignorePathParameterRulesPanel.add(ignorePathRuleInputPanel, BorderLayout.CENTER);
+        ignorePathParameterRulesPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, ignorePathParameterRulesPanel.getPreferredSize().height));
+        ignorePathParameterRulesPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        projectSettingsPanel.add(ignorePathParameterRulesPanel);
+        projectSettingsPanel.add(Box.createRigidArea(new Dimension(0, 5)));
+
         centerPanel.add(projectSettingsPanel);
         centerPanel.add(Box.createRigidArea(new Dimension(0, 10))); // Thêm khoảng trống giữa các nhóm
 

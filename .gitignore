@@ -141,3 +141,12 @@ credentials.txt
 *.pem
 *.p12
 *.keystore
+
+
+# codegraph
+.codegraph/
+.claude/
+.gitnexus/
+AGENTS.md
+.gitignore
+CLAUDE.md
