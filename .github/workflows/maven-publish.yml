@@ -29,14 +29,16 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      # Một lần build sinh ra 2 bản .jar (xem cấu hình shade trong pom.xml):
-      #   *-all.jar     : Windows/Linux/macOS trên x86_64 + aarch64
-      #   *-win-x64.jar : chỉ Windows x86_64, nhẹ hơn ~4.6 lần
+      # Một lần build sinh ra 4 bản .jar (xem cấu hình shade trong pom.xml):
+      #   *-all.jar       : Windows/Linux/macOS trên x86_64 + aarch64
+      #   *-win-x64.jar   : chỉ Windows x86_64
+      #   *-linux-x64.jar : chỉ Linux x86_64
+      #   *-mac-arm64.jar : chỉ macOS aarch64 (Apple Silicon)
       - name: Build with Maven
         run: mvn -B package --file pom.xml
 
       - name: List built JARs
-        run: ls -lh target/*-all.jar target/*-win-x64.jar
+        run: ls -lh target/*-all.jar target/*-win-x64.jar target/*-linux-x64.jar target/*-mac-arm64.jar
 
       - name: Upload JARs as build artifacts
         uses: actions/upload-artifact@v4
@@ -45,6 +47,8 @@ jobs:
           path: |
             target/*-all.jar
             target/*-win-x64.jar
+            target/*-linux-x64.jar
+            target/*-mac-arm64.jar
           if-no-files-found: error
 
       - name: Create Release and Upload JARs
@@ -56,3 +60,5 @@ jobs:
           files: |
             target/*-all.jar
             target/*-win-x64.jar
+            target/*-linux-x64.jar
+            target/*-mac-arm64.jar

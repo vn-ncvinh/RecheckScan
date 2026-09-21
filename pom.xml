@@ -50,8 +50,10 @@
                 sqlite-jdbc đóng gói sẵn native lib cho 24 nền tảng (~13 MB), trong khi
                 Burp thực tế chỉ chạy trên một vài nền tảng. Mỗi execution dưới đây loại bỏ
                 các native lib không cần và xuất ra một file .jar riêng:
-                  - *-all.jar     : Windows/Linux/macOS trên x86_64 + aarch64 (~3.7 MB)
-                  - *-win-x64.jar : chỉ Windows x86_64 (~0.8 MB)
+                  - *-all.jar       : Windows/Linux/macOS trên x86_64 + aarch64 (~3.7 MB)
+                  - *-win-x64.jar   : chỉ Windows x86_64 (~0.8 MB)
+                  - *-linux-x64.jar : chỉ Linux x86_64 (~0.8 MB)
+                  - *-mac-arm64.jar : chỉ macOS aarch64 / Apple Silicon (~0.9 MB)
             -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -127,6 +129,64 @@
                                         <exclude>org/sqlite/native/Windows/x86/**</exclude>
                                         <exclude>org/sqlite/native/Windows/armv7/**</exclude>
                                         <exclude>org/sqlite/native/Windows/aarch64/**</exclude>
+                                        <exclude>META-INF/maven/**</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+
+                    <!-- Bản gọn nhẹ: chỉ dùng được trên Linux x86_64 -->
+                    <execution>
+                        <id>shade-linux-x64</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <outputFile>${project.build.directory}/${project.artifactId}-${project.version}-linux-x64.jar</outputFile>
+                            <filters>
+                                <filter>
+                                    <artifact>org.xerial:sqlite-jdbc</artifact>
+                                    <excludes>
+                                        <exclude>org/sqlite/native/Windows/**</exclude>
+                                        <exclude>org/sqlite/native/Mac/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Android/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Musl/**</exclude>
+                                        <exclude>org/sqlite/native/FreeBSD/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/x86/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/arm/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/armv6/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/armv7/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/aarch64/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/ppc64/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/riscv64/**</exclude>
+                                        <exclude>META-INF/maven/**</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+
+                    <!-- Bản gọn nhẹ: chỉ dùng được trên macOS aarch64 (Apple Silicon) -->
+                    <execution>
+                        <id>shade-mac-arm64</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <outputFile>${project.build.directory}/${project.artifactId}-${project.version}-mac-arm64.jar</outputFile>
+                            <filters>
+                                <filter>
+                                    <artifact>org.xerial:sqlite-jdbc</artifact>
+                                    <excludes>
+                                        <exclude>org/sqlite/native/Windows/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Android/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Musl/**</exclude>
+                                        <exclude>org/sqlite/native/FreeBSD/**</exclude>
+                                        <exclude>org/sqlite/native/Mac/x86_64/**</exclude>
                                         <exclude>META-INF/maven/**</exclude>
                                     </excludes>
                                 </filter>
