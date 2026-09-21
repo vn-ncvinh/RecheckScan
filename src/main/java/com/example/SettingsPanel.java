@@ -26,6 +26,7 @@ public class SettingsPanel {
      * @param totalLbl, scannedLbl, etc. Các nhãn để hiển thị thống kê.
      * @param excludeStatusCodesField Trường nhập các status code cần loại trừ.
      * @param ignorePathParameterRulesArea Vùng nhập các regex path không áp dụng rule parameter.
+     * @param ignoredParameterRulesArea Vùng nhập các rule loại bỏ tham số khỏi việc theo dõi.
      * @return Một JPanel chứa toàn bộ giao diện của tab Settings.
      */
     public static JPanel create(
@@ -43,7 +44,8 @@ public class SettingsPanel {
             JLabel     unverifiedLbl,
             JTextField excludeStatusCodesField,
             JTextArea  pathParameterRulesArea,
-            JTextArea  ignorePathParameterRulesArea) {
+            JTextArea  ignorePathParameterRulesArea,
+            JTextArea  ignoredParameterRulesArea) {
 
         /* ========= PANEL GỐC (ROOT) ========= */
         JPanel settingsPanel = new JPanel();
@@ -131,6 +133,25 @@ public class SettingsPanel {
         ignorePathParameterRulesPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, ignorePathParameterRulesPanel.getPreferredSize().height));
         ignorePathParameterRulesPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
         projectSettingsPanel.add(ignorePathParameterRulesPanel);
+        projectSettingsPanel.add(Box.createRigidArea(new Dimension(0, 5)));
+
+        // Panel cho rule loại bỏ tham số không cần theo dõi
+        JPanel ignoredParameterRulesPanel = new JPanel(new BorderLayout(5, 0));
+        ignoredParameterRulesPanel.add(new JLabel("Ignored Parameter Rules: "), BorderLayout.WEST);
+        ignoredParameterRulesArea.setRows(3);
+        ignoredParameterRulesArea.setToolTipText("One rule per line. Supports exact names, wildcards, and regex: rules. Each rule must match the whole parameter name.");
+        JScrollPane ignoredParamRuleScroll = new JScrollPane(ignoredParameterRulesArea);
+        JLabel ignoredParamRuleHelpLabel = new JLabel("One rule per line, matched against the whole parameter name. Examples: utm_*, _ga, timestamp, regex:^__.*$");
+        ignoredParamRuleHelpLabel.setFont(ignoredParamRuleHelpLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        ignoredParamRuleHelpLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
+
+        JPanel ignoredParamRuleInputPanel = new JPanel(new BorderLayout(0, 3));
+        ignoredParamRuleInputPanel.add(ignoredParamRuleScroll, BorderLayout.CENTER);
+        ignoredParamRuleInputPanel.add(ignoredParamRuleHelpLabel, BorderLayout.SOUTH);
+        ignoredParameterRulesPanel.add(ignoredParamRuleInputPanel, BorderLayout.CENTER);
+        ignoredParameterRulesPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, ignoredParameterRulesPanel.getPreferredSize().height));
+        ignoredParameterRulesPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        projectSettingsPanel.add(ignoredParameterRulesPanel);
         projectSettingsPanel.add(Box.createRigidArea(new Dimension(0, 5)));
 
         centerPanel.add(projectSettingsPanel);

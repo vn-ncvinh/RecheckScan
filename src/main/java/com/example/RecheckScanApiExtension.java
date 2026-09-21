@@ -27,6 +27,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -69,10 +70,12 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     private volatile String exclude_status_code;
     private volatile String path_parameter_rules;
     private volatile String ignore_path_parameter_rules;
+    private volatile String ignored_parameter_rules;
     private volatile boolean highlightEnabled = false;
     private volatile boolean noteEnabled = false;
     private volatile boolean autoBypassNoParam = false;
     private volatile PathParameterRules pathRules = PathParameterRules.empty();
+    private volatile IgnoredParameterRules ignoredParameterRules = IgnoredParameterRules.empty();
     /**
      * Danh sách status code bị loại trừ, được biên dịch sẵn để không phải parse lại cho từng response.
      */
@@ -271,7 +274,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             }
         }
 
-        return allParamNames;
+        // Loại bỏ các tham số người dùng đã khai là không cần theo dõi, ngay tại nguồn:
+        // chúng sẽ không vào CSDL, và Scanner cũng thấy cùng một tập tham số đã lọc.
+        return ignoredParameterRules.filter(allParamNames);
     }
 
 
@@ -474,7 +479,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         JButton unscannedRefreshButton = new JButton("Refresh");
         unscannedRefreshButton.addActionListener(e -> reloadDataAsync());
         JPanel unscannedPanel = createApiPanel("Search unscanned paths:", unscannedTable, unscannedRefreshButton, (keyword, sorter) -> {
-            RowFilter<Object, Object> textFilter = keyword.isEmpty() ? null : RowFilter.regexFilter("(?i)" + keyword, 2);
+            RowFilter<Object, Object> textFilter = createPathSearchFilter(keyword);
             sorter.setRowFilter(textFilter != null ? RowFilter.andFilter(Arrays.asList(unscannedStatusFilter, textFilter)) : unscannedStatusFilter);
         });
         tabs.addTab("Unscanned", unscannedPanel);
@@ -487,7 +492,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         JButton logsRefreshButton = new JButton("Refresh");
         logsRefreshButton.addActionListener(e -> reloadDataAsync());
         JPanel logsPanel = createApiPanel("Search all paths:", logsTable, logsRefreshButton, (keyword, sorter) -> {
-            sorter.setRowFilter(keyword.isEmpty() ? null : RowFilter.regexFilter("(?i)" + keyword, 2));
+            sorter.setRowFilter(createPathSearchFilter(keyword));
         });
         tabs.addTab("Logs", logsPanel);
 
@@ -497,6 +502,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         JTextField excludeStatusCodesField = new JTextField(exclude_status_code != null ? exclude_status_code : "404,405");
         JTextArea pathParameterRulesArea = new JTextArea(path_parameter_rules != null ? path_parameter_rules : "");
         JTextArea ignorePathParameterRulesArea = new JTextArea(ignore_path_parameter_rules != null ? ignore_path_parameter_rules : "");
+        JTextArea ignoredParameterRulesArea = new JTextArea(ignored_parameter_rules != null ? ignored_parameter_rules : "");
         JButton browseButton = new JButton("Browse");
         browseButton.addActionListener(e -> {
             JFileChooser fileChooser = new JFileChooser();
@@ -527,8 +533,10 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             exclude_status_code = excludeStatusCodesField.getText().trim();
             path_parameter_rules = pathParameterRulesArea.getText().trim();
             ignore_path_parameter_rules = ignorePathParameterRulesArea.getText().trim();
+            ignored_parameter_rules = ignoredParameterRulesArea.getText().trim();
             excludedStatusCodes = parseStatusCodes(exclude_status_code);
             pathRules = compilePathRules();
+            ignoredParameterRules = compileIgnoredParameterRules();
             autoBypassNoParam = autoBypassCheckBox.isSelected();
             saveSettings();
 
@@ -537,14 +545,18 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             applyButton.setEnabled(false);
             final String dbPath = savedOutputPath;
             final boolean normalizePaths = !pathRules.isEmpty();
+            final boolean cleanIgnoredParams = !ignoredParameterRules.isEmpty();
             final boolean bypassOldRecords = autoBypassNoParam;
             runOnDbThread(() -> {
                 // Mở lại CSDL trước để đảm bảo đang làm việc với đúng file.
                 databaseManager.reopen(dbPath);
 
-                // *** Áp dụng chuẩn hoá path và bypass cho dữ liệu cũ ***
+                // *** Áp dụng chuẩn hoá path, loại tham số và bypass cho dữ liệu cũ ***
                 if (normalizePaths) {
                     databaseManager.normalizeStoredPaths(this::normalizePath);
+                }
+                if (cleanIgnoredParams) {
+                    databaseManager.removeIgnoredParameters(ignoredParameterRules::isIgnored);
                 }
                 if (bypassOldRecords) {
                     databaseManager.applyAutoBypassToOldRecords();
@@ -560,7 +572,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 });
             });
         });
-        tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightCheckBox, noteCheckBox, autoBypassCheckBox, applyButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl, excludeStatusCodesField, pathParameterRulesArea, ignorePathParameterRulesArea));
+        tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightCheckBox, noteCheckBox, autoBypassCheckBox, applyButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl, excludeStatusCodesField, pathParameterRulesArea, ignorePathParameterRulesArea, ignoredParameterRulesArea));
         
         // Đăng ký tab chính vào giao diện Burp.
         JPanel mainPanel = new JPanel(new BorderLayout());
@@ -641,6 +653,13 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
      */
     private PathParameterRules compilePathRules() {
         return PathParameterRules.compile(path_parameter_rules, ignore_path_parameter_rules, api.logging()::logToError);
+    }
+
+    /**
+     * Biên dịch cấu hình rule loại bỏ tham số hiện tại, đẩy lỗi cú pháp ra log của Burp.
+     */
+    private IgnoredParameterRules compileIgnoredParameterRules() {
+        return IgnoredParameterRules.compile(ignored_parameter_rules, api.logging()::logToError);
     }
 
     /**
@@ -727,6 +746,22 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, null);
             }
         });
+
+        // MenuItem đánh dấu trạng thái hàng loạt cho các dòng đang chọn.
+        JMenuItem markBypassItem = new JMenuItem("Mark as Bypass");
+        markBypassItem.addActionListener(e -> applyStatusToSelectedRows(table, 6));
+        JMenuItem markRejectItem = new JMenuItem("Mark as Reject");
+        markRejectItem.addActionListener(e -> applyStatusToSelectedRows(table, 5));
+
+        // MenuItem xoá hẳn các API đã chọn khỏi CSDL.
+        JMenuItem deleteSelectedItem = new JMenuItem("Delete selected");
+        deleteSelectedItem.addActionListener(e -> deleteSelectedRows(table));
+
+        contextMenu.add(markBypassItem);
+        contextMenu.add(markRejectItem);
+        contextMenu.addSeparator();
+        contextMenu.add(deleteSelectedItem);
+        contextMenu.addSeparator();
         contextMenu.add(copyApiListItem);
 
         // Đăng ký mouse listener cho right-click
@@ -788,6 +823,131 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     interface SearchHandler {
         void apply(String keyword, TableRowSorter<DefaultTableModel> sorter);
     }
+
+    /**
+     * Dựng bộ lọc cho ô tìm kiếm theo cột Path.
+     * <p>
+     * Từ khoá được escape nên ký tự đặc biệt của regex ('[', '(', '+'…) được hiểu đúng
+     * là văn bản chứ không làm hỏng bộ lọc. Ngoài ra dạng đã chuẩn hoá của từ khoá cũng
+     * được tìm, nhờ đó dán một URL thô vẫn ra được dòng đang lưu dưới dạng placeholder.
+     *
+     * @return Bộ lọc tương ứng, hoặc null khi từ khoá rỗng.
+     */
+    private RowFilter<Object, Object> createPathSearchFilter(String keyword) {
+        if (keyword == null || keyword.isEmpty()) {
+            return null;
+        }
+
+        List<RowFilter<Object, Object>> filters = new ArrayList<>();
+        filters.add(RowFilter.regexFilter("(?i)" + Pattern.quote(keyword), 2));
+
+        String normalizedKeyword = normalizePath(keyword);
+        if (normalizedKeyword != null && !normalizedKeyword.equals(keyword)) {
+            filters.add(RowFilter.regexFilter("(?i)" + Pattern.quote(normalizedKeyword), 2));
+        }
+
+        return filters.size() == 1 ? filters.get(0) : RowFilter.orFilter(filters);
+    }
+
+    /**
+     * Đánh dấu Reject (cột 5) hoặc Bypass (cột 6) cho mọi dòng đang chọn đủ điều kiện.
+     * Chỉ được gọi trên EDT.
+     */
+    private void applyStatusToSelectedRows(JTable table, int statusColumn) {
+        int[] selectedViewRows = table.getSelectedRows();
+        if (selectedViewRows.length == 0) {
+            return;
+        }
+
+        // Chuyển sang chỉ số model trước khi sửa, vì việc sửa có thể làm đổi thứ tự hiển thị.
+        List<Integer> selectedModelRows = new ArrayList<>();
+        for (int viewRow : selectedViewRows) {
+            selectedModelRows.add(table.convertRowIndexToModel(viewRow));
+        }
+
+        int updated = 0;
+        int skipped = 0;
+        for (int modelRow : selectedModelRows) {
+            if (canApplyStatus(modelRow, statusColumn)) {
+                tableModel.setValueAt(true, modelRow, statusColumn);
+                updated++;
+            } else {
+                skipped++;
+            }
+        }
+
+        if (skipped > 0) {
+            String statusName = statusColumn == 5 ? "Reject" : "Bypass";
+            JOptionPane.showMessageDialog(null,
+                    statusName + " applied to " + updated + " row(s). Skipped " + skipped + " row(s) because they are not eligible.");
+        }
+    }
+
+    /**
+     * Áp dụng cùng điều kiện với {@code isCellEditable}: API đã quét thì không đổi được,
+     * và Reject chỉ dành cho API đã từng gửi qua Repeater.
+     */
+    private boolean canApplyStatus(int modelRow, int statusColumn) {
+        boolean isScanned = Boolean.TRUE.equals(tableModel.getValueAt(modelRow, 4));
+        if (isScanned) {
+            return false;
+        }
+
+        if (statusColumn == 5) {
+            return Boolean.TRUE.equals(tableModel.getValueAt(modelRow, 7));
+        }
+
+        return statusColumn == 6;
+    }
+
+    /**
+     * Xoá hẳn khỏi CSDL các API đang chọn mà không còn nằm trong scope.
+     * API còn trong scope được giữ lại vì chúng sẽ xuất hiện trở lại ngay khi có traffic.
+     * Chỉ được gọi trên EDT.
+     */
+    private void deleteSelectedRows(JTable table) {
+        int[] selectedViewRows = table.getSelectedRows();
+        if (selectedViewRows.length == 0) {
+            return;
+        }
+
+        List<Integer> idsToDelete = new ArrayList<>();
+        int skipped = 0;
+        for (int viewRow : selectedViewRows) {
+            int modelRow = table.convertRowIndexToModel(viewRow);
+            String host = String.valueOf(tableModel.getValueAt(modelRow, 1));
+            String path = String.valueOf(tableModel.getValueAt(modelRow, 2));
+
+            boolean inScope = api.scope().isInScope("http://" + host + path)
+                    || api.scope().isInScope("https://" + host + path);
+            if (inScope) {
+                skipped++;
+                continue;
+            }
+
+            idsToDelete.add((Integer) tableModel.getValueAt(modelRow, 8));
+        }
+
+        if (idsToDelete.isEmpty()) {
+            JOptionPane.showMessageDialog(null,
+                    "Nothing deleted: all " + skipped + " selected API(s) are still in scope.");
+            return;
+        }
+
+        String message = "Are you sure you want to delete " + idsToDelete.size() + " selected API(s)?"
+                + (skipped > 0 ? "\n" + skipped + " in-scope API(s) will be kept." : "");
+        int confirm = JOptionPane.showConfirmDialog(null, message, "Confirm Delete", JOptionPane.YES_NO_OPTION);
+        if (confirm != JOptionPane.YES_OPTION) {
+            return;
+        }
+
+        runOnDbThread(() -> {
+            databaseManager.deleteApisByIds(idsToDelete);
+            List<Object[]> rows = databaseManager.loadApiData();
+            rebuildStatusCache(rows);
+            SwingUtilities.invokeLater(() -> populateTable(rows));
+        });
+    }
     
     /**
      * Lưu các cài đặt hiện tại vào persistence extension data (đi theo project).
@@ -808,6 +968,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             props.setProperty("exclude_status_code", valueOrEmpty(exclude_status_code));
             props.setProperty("path_parameter_rules", valueOrEmpty(path_parameter_rules));
             props.setProperty("ignore_path_parameter_rules", valueOrEmpty(ignore_path_parameter_rules));
+            props.setProperty("ignored_parameter_rules", valueOrEmpty(ignored_parameter_rules));
             
             StringWriter writer = new StringWriter();
             props.store(writer, null);
@@ -852,6 +1013,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 exclude_status_code = props.getProperty("exclude_status_code", "");
                 path_parameter_rules = props.getProperty("path_parameter_rules", "");
                 ignore_path_parameter_rules = props.getProperty("ignore_path_parameter_rules", "");
+                ignored_parameter_rules = props.getProperty("ignored_parameter_rules", "");
             }
             if (path_parameter_rules == null) {
                 path_parameter_rules = "";
@@ -859,7 +1021,11 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             if (ignore_path_parameter_rules == null) {
                 ignore_path_parameter_rules = "";
             }
+            if (ignored_parameter_rules == null) {
+                ignored_parameter_rules = "";
+            }
             pathRules = compilePathRules();
+            ignoredParameterRules = compileIgnoredParameterRules();
             excludedStatusCodes = parseStatusCodes(exclude_status_code);
         } catch (Exception e) {
             api.logging().logToError("Failed to load settings: " + e.getMessage());

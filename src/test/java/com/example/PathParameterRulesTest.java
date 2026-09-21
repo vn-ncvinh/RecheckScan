@@ -116,6 +116,45 @@ class PathParameterRulesTest {
     }
 
     @Test
+    void ruleCoDauGachCheoChiTacDongDungViTriChiDinh() {
+        // Rule regex chua '/' duoc coi la path-aware: khop tren toan path chu khong theo segment.
+        PathParameterRules rules = compile("{id}=regex:/api/users/([0-9]+)");
+
+        // Chi id cua users bi thay, so 678 cua posts giu nguyen.
+        assertEquals("/api/users/{id}/posts/678", rules.normalize("/api/users/12345/posts/678"));
+    }
+
+    @Test
+    void rulePathAwareKhongCoNhomBatThiThayPhanSauDauGachCuoi() {
+        PathParameterRules rules = compile("{id}=regex:/api/users/[0-9]+");
+
+        assertEquals("/api/users/{id}/posts", rules.normalize("/api/users/12345/posts"));
+    }
+
+    @Test
+    void rulePathAwareApDungChoMoiLanXuatHien() {
+        PathParameterRules rules = compile("{id}=regex:/item/([0-9]+)");
+
+        assertEquals("/item/{id}/item/{id}", rules.normalize("/item/1/item/2"));
+    }
+
+    @Test
+    void regexKhongCoDauGachCheoVanLaRuleTheoSegment() {
+        // Khong co '/' nen van la rule segment thong thuong, khop tron ven tung segment.
+        PathParameterRules rules = compile("{id}=regex:[0-9]+");
+
+        assertEquals("/api/{id}/posts", rules.normalize("/api/12345/posts"));
+    }
+
+    @Test
+    void ruleSegmentVaPathAwareKetHopDuocVoiNhau() {
+        PathParameterRules rules = compile("{uid}=regex:/users/([0-9]+)\n{uuid}=uuid");
+
+        assertEquals("/users/{uid}/files/{uuid}",
+                rules.normalize("/users/42/files/3f2504e0-4f89-11d3-9a0c-0305e82c3301"));
+    }
+
+    @Test
     void ignoreRuleGiuNguyenPathKhop() {
         PathParameterRules rules = PathParameterRules.compile(
                 "{id}=number:4", "^/api/reports/[0-9]{4}/summary$", errors::add);

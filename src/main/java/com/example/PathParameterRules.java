@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -72,6 +73,19 @@ final class PathParameterRules {
             return path;
         }
 
+        String normalizedPath = path;
+        for (PathParameterRule rule : rules) {
+            normalizedPath = rule.isPathAware()
+                    ? applyPathAwareRule(normalizedPath, rule)
+                    : applySegmentRule(normalizedPath, rule);
+        }
+        return normalizedPath;
+    }
+
+    /**
+     * Rule thường: so khớp trọn vẹn từng segment của path và thay các segment khớp.
+     */
+    private static String applySegmentRule(String path, PathParameterRule rule) {
         String[] segments = path.split("/", -1);
         boolean changed = false;
         for (int i = 0; i < segments.length; i++) {
@@ -79,15 +93,55 @@ final class PathParameterRules {
             if (segment.isEmpty()) {
                 continue;
             }
-            for (PathParameterRule rule : rules) {
-                if (rule.matches(segment)) {
-                    segments[i] = rule.placeholder();
-                    changed = true;
-                    break;
-                }
+            if (rule.matches(segment)) {
+                segments[i] = rule.placeholder();
+                changed = true;
             }
         }
         return changed ? String.join("/", segments) : path;
+    }
+
+    /**
+     * Rule path-aware: regex được so khớp trên toàn bộ path thay vì từng segment,
+     * nhờ đó rule chỉ tác động đúng vị trí mong muốn.
+     * <p>
+     * Ví dụ {@code {id}=regex:/api/users/([0-9]+)} biến
+     * {@code /api/users/12345/posts/678} thành {@code /api/users/{id}/posts/678}
+     * mà không đụng tới {@code 678}.
+     */
+    private static String applyPathAwareRule(String path, PathParameterRule rule) {
+        Matcher matcher = rule.pattern().matcher(path);
+        StringBuilder normalizedPath = new StringBuilder();
+        boolean changed = false;
+        while (matcher.find()) {
+            String replacement = buildPathAwareReplacement(matcher, rule.placeholder());
+            matcher.appendReplacement(normalizedPath, Matcher.quoteReplacement(replacement));
+            changed = true;
+        }
+        matcher.appendTail(normalizedPath);
+        return changed ? normalizedPath.toString() : path;
+    }
+
+    /**
+     * Xác định phần nào trong đoạn vừa khớp sẽ bị thay bằng placeholder.
+     * Ưu tiên nhóm bắt (capturing group) đầu tiên tham gia khớp; nếu rule không có nhóm nào
+     * thì thay phần nằm sau dấu '/' cuối cùng.
+     */
+    private static String buildPathAwareReplacement(Matcher matcher, String placeholder) {
+        String match = matcher.group();
+        for (int groupIndex = 1; groupIndex <= matcher.groupCount(); groupIndex++) {
+            if (matcher.start(groupIndex) >= 0) {
+                int relativeStart = matcher.start(groupIndex) - matcher.start();
+                int relativeEnd = matcher.end(groupIndex) - matcher.start();
+                return match.substring(0, relativeStart) + placeholder + match.substring(relativeEnd);
+            }
+        }
+
+        int lastSlashIndex = match.lastIndexOf('/');
+        if (lastSlashIndex >= 0) {
+            return match.substring(0, lastSlashIndex + 1) + placeholder;
+        }
+        return placeholder;
     }
 
     /**
@@ -119,7 +173,7 @@ final class PathParameterRules {
             String spec = line.substring(separatorIndex + 1).trim();
             Pattern pattern = compilePattern(spec, errorLogger);
             if (pattern != null) {
-                compiledRules.add(new PathParameterRule(placeholder, pattern));
+                compiledRules.add(new PathParameterRule(placeholder, pattern, isPathAwareSpec(spec)));
             }
         }
         return compiledRules;
@@ -144,6 +198,15 @@ final class PathParameterRules {
             }
         }
         return compiledPatterns;
+    }
+
+    /**
+     * Một rule được coi là path-aware khi nó là regex tự viết và có chứa '/',
+     * tức người dùng đang mô tả một vị trí cụ thể trong path chứ không phải dạng của một segment.
+     */
+    private static boolean isPathAwareSpec(String spec) {
+        return spec.toLowerCase(Locale.ROOT).startsWith("regex:")
+                && spec.substring("regex:".length()).contains("/");
     }
 
     private static String normalizePlaceholder(String placeholder) {

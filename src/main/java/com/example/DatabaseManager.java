@@ -5,6 +5,7 @@ import burp.api.montoya.MontoyaApi;
 import java.io.File;
 import java.sql.*;
 import java.util.*;
+import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
@@ -409,6 +410,113 @@ public class DatabaseManager {
     static String setToString(Set<String> set) {
         if (set == null || set.isEmpty()) return "";
         return set.stream().sorted().collect(Collectors.joining("|"));
+    }
+
+    /**
+     * Xoá khỏi các bản ghi cũ mọi tham số khớp rule "ignored parameter".
+     * Được gọi khi người dùng bấm Apply để dữ liệu đã lưu khớp với cấu hình mới.
+     *
+     * @param ignoredParameterPredicate Vị từ xác định một tên tham số có bị loại hay không.
+     * @return Số bản ghi đã được cập nhật.
+     */
+    public synchronized int removeIgnoredParameters(Predicate<String> ignoredParameterPredicate) {
+        if (ignoredParameterPredicate == null) {
+            return 0;
+        }
+
+        List<ParameterCleanupUpdate> updates = new ArrayList<>();
+        String selectSql = "SELECT id, unscanned_params, scanned_params FROM api_log ORDER BY id ASC";
+
+        try (Statement selectStmt = connection.createStatement();
+             ResultSet rs = selectStmt.executeQuery(selectSql)) {
+            while (rs.next()) {
+                Set<String> unscannedParams = stringToSet(rs.getString("unscanned_params"));
+                Set<String> scannedParams = stringToSet(rs.getString("scanned_params"));
+                // Dùng '|' chứ không phải '||' để cả hai vế đều được thực thi.
+                boolean changed = unscannedParams.removeIf(ignoredParameterPredicate)
+                        | scannedParams.removeIf(ignoredParameterPredicate);
+
+                if (!changed) {
+                    continue;
+                }
+
+                boolean hasRemainingParams = !unscannedParams.isEmpty() || !scannedParams.isEmpty();
+                boolean isFullyScanned = hasRemainingParams && unscannedParams.isEmpty();
+
+                updates.add(new ParameterCleanupUpdate(rs.getInt("id"), unscannedParams, scannedParams, isFullyScanned));
+            }
+        } catch (SQLException e) {
+            api.logging().logToError("Error loading records for ignored parameter cleanup: " + e.getMessage(), e);
+            return 0;
+        }
+
+        if (updates.isEmpty()) {
+            return 0;
+        }
+
+        String updateSql = """
+                UPDATE api_log
+                SET unscanned_params = ?,
+                    scanned_params = ?,
+                    is_scanned = ?,
+                    is_rejected = CASE WHEN ? THEN 0 ELSE is_rejected END,
+                    is_bypassed = CASE WHEN ? THEN 0 ELSE is_bypassed END,
+                    last_seen = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """;
+
+        try (PreparedStatement updateStmt = connection.prepareStatement(updateSql)) {
+            for (ParameterCleanupUpdate update : updates) {
+                updateStmt.setString(1, setToString(update.unscannedParams));
+                updateStmt.setString(2, setToString(update.scannedParams));
+                updateStmt.setBoolean(3, update.isFullyScanned);
+                updateStmt.setBoolean(4, update.isFullyScanned);
+                updateStmt.setBoolean(5, update.isFullyScanned);
+                updateStmt.setInt(6, update.id);
+                updateStmt.addBatch();
+            }
+            updateStmt.executeBatch();
+
+            api.logging().logToOutput("Removed ignored parameters from " + updates.size() + " stored API records.");
+            return updates.size();
+        } catch (SQLException e) {
+            api.logging().logToError("Error during ignored parameter cleanup: " + e.getMessage(), e);
+            return 0;
+        }
+    }
+
+    private static class ParameterCleanupUpdate {
+        private final int id;
+        private final Set<String> unscannedParams;
+        private final Set<String> scannedParams;
+        private final boolean isFullyScanned;
+
+        private ParameterCleanupUpdate(int id, Set<String> unscannedParams, Set<String> scannedParams, boolean isFullyScanned) {
+            this.id = id;
+            this.unscannedParams = unscannedParams;
+            this.scannedParams = scannedParams;
+            this.isFullyScanned = isFullyScanned;
+        }
+    }
+
+    /**
+     * Xoá hẳn các API khỏi CSDL theo danh sách ID.
+     *
+     * @return Số dòng đã bị xoá.
+     */
+    public synchronized int deleteApisByIds(List<Integer> ids) {
+        if (ids == null || ids.isEmpty()) return 0;
+        String placeholders = ids.stream().map(id -> "?").collect(Collectors.joining(","));
+        String sql = "DELETE FROM api_log WHERE id IN (" + placeholders + ")";
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            for (int i = 0; i < ids.size(); i++) {
+                stmt.setInt(i + 1, ids.get(i));
+            }
+            return stmt.executeUpdate();
+        } catch (SQLException e) {
+            api.logging().logToError("Failed to delete APIs: " + e.getMessage(), e);
+            return 0;
+        }
     }
 
     public synchronized int normalizeStoredPaths(UnaryOperator<String> pathNormalizer) {
