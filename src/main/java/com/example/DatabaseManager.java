@@ -5,6 +5,7 @@ import burp.api.montoya.MontoyaApi;
 import java.io.File;
 import java.sql.*;
 import java.util.*;
+import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
@@ -568,6 +569,101 @@ public class DatabaseManager {
         }
     }
     
+    /**
+     * Xoá khỏi CSDL các tham số khớp rule "Ignore Parameters" và tính lại trạng thái.
+     * Được gọi khi người dùng nhấn Apply trong Settings.
+     * <p>
+     * Tham số bị bỏ qua sẽ được gỡ khỏi cả `unscanned_params` lẫn `scanned_params`.
+     * Nếu sau khi gỡ mà không còn param chưa quét (nhưng vẫn còn param đã quét),
+     * bản ghi được đánh dấu `is_scanned = 1`. Bản ghi không còn param nào sẽ được
+     * xử lý tiếp bởi {@link #applyAutoBypassToOldRecords()} nếu auto-bypass đang bật.
+     *
+     * @param isIgnoredParam Vị từ xác định một tên tham số có bị bỏ qua hay không.
+     * @return Số lượng dòng đã được cập nhật.
+     */
+    public synchronized int purgeIgnoredParams(Predicate<String> isIgnoredParam) {
+        if (isIgnoredParam == null) {
+            return 0;
+        }
+
+        List<ApiRecord> records = new ArrayList<>();
+        String selectSql = """
+            SELECT id, method, host, path, unscanned_params, scanned_params, is_scanned, is_rejected, is_bypassed, is_from_repeater
+            FROM api_log
+            WHERE (unscanned_params IS NOT NULL AND unscanned_params != '')
+               OR (scanned_params IS NOT NULL AND scanned_params != '')
+            """;
+        try (Statement stmt = connection.createStatement(); ResultSet rs = stmt.executeQuery(selectSql)) {
+            while (rs.next()) {
+                records.add(recordFromResultSet(rs));
+            }
+        } catch (SQLException e) {
+            api.logging().logToError("Failed to load API data for ignored parameter purge: " + e.getMessage(), e);
+            return 0;
+        }
+
+        int affectedRows = 0;
+        boolean originalAutoCommit = true;
+        String updateSql = """
+            UPDATE api_log
+            SET unscanned_params = ?,
+                scanned_params = ?,
+                is_scanned = ?,
+                last_seen = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """;
+        try {
+            originalAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+
+            for (ApiRecord record : records) {
+                Set<String> keptUnscanned = filterIgnoredParams(record.unscannedParams, isIgnoredParam);
+                Set<String> keptScanned = filterIgnoredParams(record.scannedParams, isIgnoredParam);
+                if (keptUnscanned.size() == record.unscannedParams.size()
+                        && keptScanned.size() == record.scannedParams.size()) {
+                    continue; // Không param nào bị gỡ -> giữ nguyên bản ghi.
+                }
+
+                // Hết param chưa quét (mà vẫn còn param đã quét) -> API coi như đã quét xong.
+                boolean isScanned = record.isScanned || (keptUnscanned.isEmpty() && !keptScanned.isEmpty());
+
+                try (PreparedStatement stmt = connection.prepareStatement(updateSql)) {
+                    stmt.setString(1, setToString(keptUnscanned));
+                    stmt.setString(2, setToString(keptScanned));
+                    stmt.setBoolean(3, isScanned);
+                    stmt.setInt(4, record.id);
+                    affectedRows += stmt.executeUpdate();
+                }
+            }
+
+            connection.commit();
+            if (affectedRows > 0) {
+                api.logging().logToOutput("Removed ignored parameters from " + affectedRows + " stored API records.");
+            }
+        } catch (SQLException e) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackError) {
+                api.logging().logToError("Failed to rollback ignored parameter purge: " + rollbackError.getMessage(), rollbackError);
+            }
+            api.logging().logToError("Error during ignored parameter purge: " + e.getMessage(), e);
+            return 0;
+        } finally {
+            try {
+                connection.setAutoCommit(originalAutoCommit);
+            } catch (SQLException e) {
+                api.logging().logToError("Failed to restore database autocommit: " + e.getMessage(), e);
+            }
+        }
+        return affectedRows;
+    }
+
+    private Set<String> filterIgnoredParams(Set<String> params, Predicate<String> isIgnoredParam) {
+        return params.stream()
+                .filter(param -> !isIgnoredParam.test(param))
+                .collect(Collectors.toCollection(HashSet::new));
+    }
+
     /**
      * Cập nhật một cột trạng thái boolean (is_scanned, is_rejected, is_bypassed) cho một API.
      * Được sử dụng khi người dùng tick vào các checkbox trên giao diện.

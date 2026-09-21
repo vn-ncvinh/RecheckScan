@@ -26,6 +26,7 @@ public class SettingsPanel {
      * @param totalLbl, scannedLbl, etc. Các nhãn để hiển thị thống kê.
      * @param excludeStatusCodesField Trường nhập các status code cần loại trừ.
      * @param ignorePathParameterRulesArea Vùng nhập các regex path không áp dụng rule parameter.
+     * @param ignoreParamsArea Vùng nhập các tham số cần bỏ qua khi ghi nhận/quét.
      * @return Một JPanel chứa toàn bộ giao diện của tab Settings.
      */
     public static JPanel create(
@@ -43,7 +44,8 @@ public class SettingsPanel {
             JLabel     unverifiedLbl,
             JTextField excludeStatusCodesField,
             JTextArea  pathParameterRulesArea,
-            JTextArea  ignorePathParameterRulesArea) {
+            JTextArea  ignorePathParameterRulesArea,
+            JTextArea  ignoreParamsArea) {
 
         /* ========= PANEL GỐC (ROOT) ========= */
         JPanel settingsPanel = new JPanel();
@@ -130,6 +132,25 @@ public class SettingsPanel {
         ignorePathParameterRulesPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, ignorePathParameterRulesPanel.getPreferredSize().height));
         ignorePathParameterRulesPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
         projectSettingsPanel.add(ignorePathParameterRulesPanel);
+        projectSettingsPanel.add(Box.createRigidArea(new Dimension(0, 5)));
+
+        // Panel cho rule bỏ qua tham số
+        JPanel ignoreParamsPanel = new JPanel(new BorderLayout(5, 0));
+        ignoreParamsPanel.add(new JLabel("Ignore Parameters: "), BorderLayout.WEST);
+        ignoreParamsArea.setRows(3);
+        ignoreParamsArea.setToolTipText("One parameter per line. Matching parameters are never tracked and are removed from the database on Apply.");
+        JScrollPane ignoreParamsScroll = new JScrollPane(ignoreParamsArea);
+        JLabel ignoreParamsHelpLabel = new JLabel("One per line, exact name (case-insensitive) or regex:<pattern>. Examples: _csrf, timestamp, regex:^utm_.*$");
+        ignoreParamsHelpLabel.setFont(ignoreParamsHelpLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        ignoreParamsHelpLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
+
+        JPanel ignoreParamsInputPanel = new JPanel(new BorderLayout(0, 3));
+        ignoreParamsInputPanel.add(ignoreParamsScroll, BorderLayout.CENTER);
+        ignoreParamsInputPanel.add(ignoreParamsHelpLabel, BorderLayout.SOUTH);
+        ignoreParamsPanel.add(ignoreParamsInputPanel, BorderLayout.CENTER);
+        ignoreParamsPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, ignoreParamsPanel.getPreferredSize().height));
+        ignoreParamsPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        projectSettingsPanel.add(ignoreParamsPanel);
         projectSettingsPanel.add(Box.createRigidArea(new Dimension(0, 5)));
 
         centerPanel.add(projectSettingsPanel);
