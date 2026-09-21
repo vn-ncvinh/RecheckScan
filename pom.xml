@@ -54,32 +54,159 @@
         <!-- Output jar name: target/RecheckScan.jar -->
         <finalName>RecheckScan</finalName>
         <plugins>
-            <!-- Maven Shade Plugin - Creates fat JAR with all dependencies -->
+            <!--
+                Maven Shade Plugin - Creates the fat JARs.
+
+                sqlite-jdbc ships a native library for 24 platform combinations (Android,
+                FreeBSD, musl, ppc64, riscv64, 32-bit ARM...), about 24 MB uncompressed,
+                while the extension's own code is roughly 50 KB. Shading every one of them
+                into a single file makes the JAR ~14 MB for no benefit, so each execution
+                below keeps only the natives that a given Burp installation can actually load.
+
+                Four files come out of one build:
+                  RecheckScan-win-x64.jar    Windows x86_64 only
+                  RecheckScan-linux-x64.jar  Linux x86_64 only
+                  RecheckScan-mac-arm64.jar  macOS Apple Silicon only
+                  RecheckScan.jar            every common Burp platform (x86_64 + aarch64)
+
+                The platform-specific executions run first and write through <outputFile>,
+                which leaves the project's main artifact untouched; the bundle runs last and
+                replaces it, so target/RecheckScan.jar stays the default output.
+            -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
                 <version>3.5.1</version>
+                <configuration>
+                    <!-- Include all dependencies except provided ones -->
+                    <artifactSet>
+                        <excludes>
+                            <exclude>net.portswigger.burp.extensions:montoya-api</exclude>
+                        </excludes>
+                    </artifactSet>
+                    <transformers>
+                        <!-- Set main class for the JAR manifest -->
+                        <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                            <mainClass>com.example.RecheckScanApiExtension</mainClass>
+                        </transformer>
+                        <!-- Handle service files properly -->
+                        <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                    </transformers>
+                </configuration>
                 <executions>
                     <execution>
+                        <id>shade-win-x64</id>
                         <phase>package</phase>
                         <goals>
                             <goal>shade</goal>
                         </goals>
                         <configuration>
-                            <!-- Include all dependencies except provided ones -->
-                            <artifactSet>
-                                <excludes>
-                                    <exclude>net.portswigger.burp.extensions:montoya-api</exclude>
-                                </excludes>
-                            </artifactSet>
-                            <transformers>
-                                <!-- Set main class for the JAR manifest -->
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>com.example.RecheckScanApiExtension</mainClass>
-                                </transformer>
-                                <!-- Handle service files properly -->
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
-                            </transformers>
+                            <outputFile>${project.build.directory}/${project.build.finalName}-win-x64.jar</outputFile>
+                            <filters>
+                                <filter>
+                                    <artifact>org.xerial:sqlite-jdbc</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/maven/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Android/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Musl/**</exclude>
+                                        <exclude>org/sqlite/native/Mac/**</exclude>
+                                        <exclude>org/sqlite/native/FreeBSD/**</exclude>
+                                        <exclude>org/sqlite/native/Windows/x86/**</exclude>
+                                        <exclude>org/sqlite/native/Windows/aarch64/**</exclude>
+                                        <exclude>org/sqlite/native/Windows/armv7/**</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+
+                    <execution>
+                        <id>shade-linux-x64</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <outputFile>${project.build.directory}/${project.build.finalName}-linux-x64.jar</outputFile>
+                            <filters>
+                                <filter>
+                                    <artifact>org.xerial:sqlite-jdbc</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/maven/**</exclude>
+                                        <exclude>org/sqlite/native/Windows/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Android/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Musl/**</exclude>
+                                        <exclude>org/sqlite/native/Mac/**</exclude>
+                                        <exclude>org/sqlite/native/FreeBSD/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/x86/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/arm/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/armv6/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/armv7/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/aarch64/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/ppc64/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/riscv64/**</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+
+                    <execution>
+                        <id>shade-mac-arm64</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <outputFile>${project.build.directory}/${project.build.finalName}-mac-arm64.jar</outputFile>
+                            <filters>
+                                <filter>
+                                    <artifact>org.xerial:sqlite-jdbc</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/maven/**</exclude>
+                                        <exclude>org/sqlite/native/Windows/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Android/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Musl/**</exclude>
+                                        <exclude>org/sqlite/native/FreeBSD/**</exclude>
+                                        <exclude>org/sqlite/native/Mac/x86_64/**</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+
+                    <!--
+                        Chạy sau cùng và KHÔNG có <outputFile> nên nó thay thế artifact chính,
+                        tức target/RecheckScan.jar. Giữ natives cho mọi nền tảng Burp thông dụng.
+                    -->
+                    <execution>
+                        <id>shade-all-platforms</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <filters>
+                                <filter>
+                                    <artifact>org.xerial:sqlite-jdbc</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/maven/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Android/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Musl/**</exclude>
+                                        <exclude>org/sqlite/native/FreeBSD/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/x86/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/arm/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/armv6/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/armv7/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/ppc64/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/riscv64/**</exclude>
+                                        <exclude>org/sqlite/native/Windows/x86/**</exclude>
+                                        <exclude>org/sqlite/native/Windows/armv7/**</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
                         </configuration>
                     </execution>
                 </executions>

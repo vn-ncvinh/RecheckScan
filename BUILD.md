@@ -48,7 +48,10 @@ mvn package
 ```bash
 target/
 ├── classes/                          # Compiled .class files
-├── RecheckScan.jar # Main JAR file
+├── RecheckScan.jar # Fat JAR, all common Burp platforms (~3.7 MB)
+├── RecheckScan-win-x64.jar # Windows x86_64 only (~0.8 MB)
+├── RecheckScan-linux-x64.jar # Linux x86_64 only (~0.8 MB)
+├── RecheckScan-mac-arm64.jar # macOS Apple Silicon only (~0.9 MB)
 ├── original-RecheckScan.jar # JAR without dependencies
 └── maven-archiver/
 ```
@@ -61,7 +64,9 @@ target/
 2. **Go to Extensions tab**
 3. **Click "Add" button**
 4. **Select "Java" as extension type**
-5. **Browse to select**: `target/RecheckScan.jar`
+5. **Browse to select**: `target/RecheckScan.jar`, or the smaller platform-specific
+   JAR matching your OS (`-win-x64`, `-linux-x64`, `-mac-arm64`). They differ only in
+   which sqlite-jdbc native libraries they carry; the extension code is identical.
 6. **Click "Next" to load**
 
 ### Method 2: Development Mode

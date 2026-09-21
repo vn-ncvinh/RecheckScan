@@ -32,17 +32,18 @@ jobs:
       - name: Build with Maven
         run: mvn -B package --file pom.xml
 
-      # Tìm file .jar đầu ra
-      - name: Locate JAR file
-        id: locate_jar
-        run: |
-          JAR_PATH=$(find target -name "RecheckScan.jar" | head -n 1)
-          echo "jar_file=$JAR_PATH" >> "$GITHUB_OUTPUT"
+      # Liệt kê các jar đầu ra để đối chiếu kích thước trong log
+      - name: List built JARs
+        run: ls -lh target/*.jar
 
-      - name: Create Release and Upload JAR
+      - name: Create Release and Upload JARs
         if: github.event_name == 'workflow_dispatch' && inputs.create_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: manual-release-${{ github.run_number }}
           name: Manual Release ${{ github.run_number }}
-          files: ${{ steps.locate_jar.outputs.jar_file }}
+          files: |
+            target/RecheckScan.jar
+            target/RecheckScan-win-x64.jar
+            target/RecheckScan-linux-x64.jar
+            target/RecheckScan-mac-arm64.jar

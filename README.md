@@ -56,7 +56,17 @@
    - Mở Burp Suite Professional
    - Vào tab `Extensions` → `Installed`
    - Click `Add` → `Java`
-   - Chọn file `target/RecheckScan.jar`
+   - Chọn file jar phù hợp (xem bảng dưới)
+
+   | File | Dùng cho | Dung lượng |
+   |---|---|---|
+   | `target/RecheckScan.jar` | Mọi nền tảng Burp thông dụng — chọn cái này nếu không chắc | ~3.7 MB |
+   | `target/RecheckScan-win-x64.jar` | Windows x86_64 | ~0.8 MB |
+   | `target/RecheckScan-linux-x64.jar` | Linux x86_64 | ~0.8 MB |
+   | `target/RecheckScan-mac-arm64.jar` | macOS Apple Silicon | ~0.9 MB |
+
+   Bản đầy đủ nặng hơn vì mang native library SQLite cho cả Windows, Linux và macOS
+   (x86_64 lẫn aarch64); các bản còn lại chỉ mang đúng một native nên nhẹ hơn ~4 lần.
 
 3. **Xác nhận cài đặt**:
    - Tab mới "Recheck Scan" sẽ xuất hiện
