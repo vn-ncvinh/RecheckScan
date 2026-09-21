@@ -51,6 +51,8 @@
 
     <!-- Build configuration -->
     <build>
+        <!-- Output jar name: target/RecheckScan.jar -->
+        <finalName>RecheckScan</finalName>
         <plugins>
             <!-- Maven Shade Plugin - Creates fat JAR with all dependencies -->
             <plugin>

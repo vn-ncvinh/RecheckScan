@@ -48,8 +48,8 @@ mvn package
 ```bash
 target/
 ├── classes/                          # Compiled .class files
-├── burp-recheck-scan-2.0-SQLITE.jar # Main JAR file
-├── original-burp-recheck-scan-2.0-SQLITE.jar # JAR without dependencies
+├── RecheckScan.jar # Main JAR file
+├── original-RecheckScan.jar # JAR without dependencies
 └── maven-archiver/
 ```
 
@@ -61,7 +61,7 @@ target/
 2. **Go to Extensions tab**
 3. **Click "Add" button**
 4. **Select "Java" as extension type**
-5. **Browse to select**: `target/burp-recheck-scan-2.0-SQLITE.jar`
+5. **Browse to select**: `target/RecheckScan.jar`
 6. **Click "Next" to load**
 
 ### Method 2: Development Mode
@@ -180,14 +180,14 @@ ClassNotFoundException: org.sqlite.JDBC
 **Solution**: Verify shade plugin includes SQLite dependency
 ```bash
 # Check JAR contents
-jar -tf target/burp-recheck-scan-2.0-SQLITE.jar | grep sqlite
+jar -tf target/RecheckScan.jar | grep sqlite
 ```
 
 ### Build Verification
 
 ```bash
 # Verify JAR structure
-jar -tf target/burp-recheck-scan-2.0-SQLITE.jar
+jar -tf target/RecheckScan.jar
 
 # Should contain:
 # com/example/RecheckScanApiExtension.class

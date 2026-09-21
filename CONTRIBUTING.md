@@ -137,7 +137,7 @@ mvn clean compile
 # Package
 mvn package
 
-# Load target/burp-recheck-scan-2.0-SQLITE.jar vào Burp
+# Load target/RecheckScan.jar vào Burp
 ```
 
 ### Project Structure

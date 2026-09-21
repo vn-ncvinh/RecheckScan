@@ -56,7 +56,7 @@
    - Mở Burp Suite Professional
    - Vào tab `Extensions` → `Installed`
    - Click `Add` → `Java`
-   - Chọn file `target/RecheckScan-1.0.jar`
+   - Chọn file `target/RecheckScan.jar`
 
 3. **Xác nhận cài đặt**:
    - Tab mới "Recheck Scan" sẽ xuất hiện
