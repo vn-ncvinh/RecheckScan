@@ -29,20 +29,30 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      # Một lần build sinh ra 2 bản .jar (xem cấu hình shade trong pom.xml):
+      #   *-all.jar     : Windows/Linux/macOS trên x86_64 + aarch64
+      #   *-win-x64.jar : chỉ Windows x86_64, nhẹ hơn ~4.6 lần
       - name: Build with Maven
         run: mvn -B package --file pom.xml
 
-      # Tìm file .jar đầu ra
-      - name: Locate JAR file
-        id: locate_jar
-        run: |
-          JAR_PATH=$(find target -name "burp-recheck-scan*.jar" | head -n 1)
-          echo "jar_file=$JAR_PATH" >> "$GITHUB_OUTPUT"
+      - name: List built JARs
+        run: ls -lh target/*-all.jar target/*-win-x64.jar
 
-      - name: Create Release and Upload JAR
+      - name: Upload JARs as build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: burp-recheck-scan-jars
+          path: |
+            target/*-all.jar
+            target/*-win-x64.jar
+          if-no-files-found: error
+
+      - name: Create Release and Upload JARs
         if: github.event_name == 'workflow_dispatch' && inputs.create_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: manual-release-${{ github.run_number }}
           name: Manual Release ${{ github.run_number }}
-          files: ${{ steps.locate_jar.outputs.jar_file }}
+          files: |
+            target/*-all.jar
+            target/*-win-x64.jar
