@@ -39,6 +39,14 @@
             <artifactId>sqlite-jdbc</artifactId>
             <version>3.50.1.0</version>
         </dependency>
+
+        <!-- JUnit 5 - Unit tests for the pure-logic helpers -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.11.4</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <!-- Build configuration -->
@@ -85,6 +93,13 @@
                     <target>17</target>
                     <encoding>UTF-8</encoding>
                 </configuration>
+            </plugin>
+
+            <!-- Maven Surefire Plugin - Runs the JUnit 5 test suite -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.3</version>
             </plugin>
         </plugins>
     </build>
