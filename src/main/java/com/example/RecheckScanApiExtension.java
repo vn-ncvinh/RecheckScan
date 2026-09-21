@@ -21,6 +21,12 @@ import java.awt.event.MouseEvent;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.List;
 import java.util.Properties;
@@ -47,28 +53,64 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
      */
     private DatabaseManager databaseManager;
 
+    /**
+     * Toàn bộ thao tác CSDL đi qua đúng một luồng nền.
+     * <p>
+     * Vừa giới hạn tài nguyên (thay cho việc tạo một Thread mới cho mỗi response),
+     * vừa tuần tự hoá truy cập vào {@link java.sql.Connection} của SQLite vốn không thread-safe,
+     * đồng thời bảo toàn thứ tự các thao tác ghi cho cùng một API.
+     */
+    private final ExecutorService dbExecutor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "RecheckScan-DB");
+        thread.setDaemon(true);
+        return thread;
+    });
+
     // Các biến lưu trữ cài đặt của người dùng, được tải từ tệp cấu hình.
-    private String exclude_extensions;
-    private String savedOutputPath;
-    private String exclude_status_code;
-    private String path_parameter_rules;
-    private String ignored_parameter_rules;
-    private boolean highlightEnabled = false;
-    private boolean noteEnabled = false;
-    private boolean autoBypassNoParam = false;
-    private List<PathParameterRule> compiledPathParameterRules = new ArrayList<>();
-    private List<Pattern> compiledIgnoredParameterRules = new ArrayList<>();
+    // Tất cả đều `volatile`: ghi trên EDT khi người dùng bấm Apply nhưng đọc trên
+    // các luồng HTTP của Burp, nên cần đảm bảo thay đổi được nhìn thấy ngay.
+    private volatile String exclude_extensions;
+    private volatile String savedOutputPath;
+    private volatile String exclude_status_code;
+    private volatile String path_parameter_rules;
+    private volatile String ignored_parameter_rules;
+    private volatile boolean highlightEnabled = false;
+    private volatile boolean noteEnabled = false;
+    private volatile boolean autoBypassNoParam = false;
+    private volatile List<PathParameterRule> compiledPathParameterRules = List.of();
+    private volatile List<Pattern> compiledIgnoredParameterRules = List.of();
+    /**
+     * Danh sách status code bị loại trừ, biên dịch sẵn để không phải parse lại cho từng response.
+     */
+    private volatile Set<Integer> excludedStatusCodes = Set.of();
 
     /**
      * Model cho JTable, chứa dữ liệu API được hiển thị trên giao diện.
      */
     private DefaultTableModel tableModel;
     /**
-     * Một Map quan trọng để ánh xạ chỉ số dòng hiển thị trên JTable (có thể thay đổi do sắp xếp)
-     * sang ID duy nhất trong cơ sở dữ liệu (không đổi).
-     * Điều này đảm bảo việc cập nhật trạng thái luôn đúng dòng.
+     * Ánh xạ ID trong CSDL sang chỉ số dòng trong TableModel, cho phép cập nhật
+     * đúng một dòng trong O(1) thay vì tải lại toàn bộ bảng sau mỗi thay đổi.
+     * Chỉ được truy cập trên EDT.
      */
-    private final Map<Integer, Integer> modelRowToDbId = new HashMap<>();
+    private final Map<Integer, Integer> dbIdToModelRow = new HashMap<>();
+    /**
+     * Trạng thái mới nhất của từng API, khoá theo {@link DatabaseManager#statusKey}.
+     * <p>
+     * Handler HTTP phải đặt highlight/note trước khi trả response nên không thể chờ
+     * luồng CSDL; cache này cho phép tra cứu đồng bộ trong O(1) thay vì chạy SQL
+     * trên luồng HTTP của Burp.
+     */
+    private final Map<String, DatabaseManager.ApiStatus> statusCache = new ConcurrentHashMap<>();
+    /**
+     * Cờ chặn ghi ngược xuống CSDL khi bảng đang được đồng bộ từ chính CSDL.
+     * Chỉ được truy cập trên EDT.
+     */
+    private boolean suppressDbWrite = false;
+    /**
+     * Gom nhiều lần cập nhật thống kê liên tiếp thành một lần tính lại.
+     */
+    private javax.swing.Timer statsRefreshTimer;
 
     // Các nhãn (JLabel) để hiển thị thống kê trên tab Settings.
     private final JLabel totalLbl = new JLabel("Total: 0");
@@ -134,67 +176,180 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 
                 // Trường hợp 1: Request từ Scanner -> xử lý các tham số đã được quét.
                 if (sourceType == ToolType.SCANNER) {
-                    new Thread(() -> {
-                        boolean updated = databaseManager.processScannedParameters(method, host, path, requestParams);
-                        // Nếu CSDL có thay đổi, tải lại dữ liệu trên giao diện.
-                        if (updated) {
-                            SwingUtilities.invokeLater(RecheckScanApiExtension.this::loadDataFromDb);
-                        }
-                    }).start();
-                } 
+                    submitDbTask(() -> databaseManager.processScannedParameters(method, host, path, requestParams));
+                }
                 // Trường hợp 2: Request từ các công cụ khác (Proxy, Repeater) và nằm trong scope.
                 else if (api.scope().isInScope(request.url()) && !isExcludedByExtension(rawPath)) {
                     // Nếu request từ Repeater, đánh dấu vào DB.
                     if (sourceType == ToolType.REPEATER) {
-                        new Thread(() -> {
-                            boolean updated = databaseManager.updateRepeaterStatus(method, host, path);
-                            // Tải lại dữ liệu nếu trạng thái 'is_from_repeater' vừa được cập nhật.
-                            if (updated) {
-                                SwingUtilities.invokeLater(RecheckScanApiExtension.this::loadDataFromDb);
-                            }
-                        }).start();
+                        submitDbTask(() -> databaseManager.updateRepeaterStatus(method, host, path));
                     }
 
                     // Nhánh 2a: Tự động bypass cho API không có tham số.
                     if (requestParams.isEmpty() && autoBypassNoParam) {
-                        new Thread(() -> {
-                            boolean updated = databaseManager.autoBypassApi(method, host, path);
-                            if (updated) {
-                                SwingUtilities.invokeLater(RecheckScanApiExtension.this::loadDataFromDb);
-                            }
-                        }).start();
+                        submitDbTask(() -> databaseManager.autoBypassApi(method, host, path));
                          // Thêm highlight/note ngay lập tức cho request này.
                          if (highlightEnabled) response.annotations().setHighlightColor(HighlightColor.YELLOW);
                          if (noteEnabled) response.annotations().setNotes("Bypassed");
                     } else {
                         // Nhánh 2b: Xử lý request thông thường để tìm và ghi nhận tham số mới.
-                        // insertOrUpdateApi trả về trạng thái cuối cùng -> set annotation đồng bộ.
-                        Object[] status = databaseManager.insertOrUpdateApi(method, host, path, requestParams);
-                        if (status != null) {
-                            boolean isScanned = (boolean) status[0];
-                            boolean isBypassed = (boolean) status[2];
-                            boolean isRejected = (boolean) status[1];
-
-                            if (highlightEnabled && (isScanned || isBypassed)) {
-                                response.annotations().setHighlightColor(HighlightColor.YELLOW);
-                            }
-                            if (noteEnabled) {
-                                if (isScanned) {
-                                    response.annotations().setNotes("Scanned");
-                                } else if (isBypassed) {
-                                    response.annotations().setNotes("Bypassed");
-                                } else if (isRejected) {
-                                    response.annotations().setNotes("Rejected");
-                                }
-                            }
-                        }
-                        new Thread(() -> SwingUtilities.invokeLater(RecheckScanApiExtension.this::loadDataFromDb)).start();
+                        // Annotation được suy ra từ cache trạng thái, cho ra đúng kết quả mà
+                        // insertOrUpdateApi sẽ để lại, nhưng không phải chạy SQL trên luồng HTTP.
+                        applyAnnotations(response, method, host, path, requestParams);
+                        submitDbTask(() -> databaseManager.insertOrUpdateApi(method, host, path, requestParams));
                     }
                 }
 
                 return ResponseReceivedAction.continueWith(response);
             }
         });
+    }
+
+    /**
+     * Đặt highlight/note cho response dựa trên trạng thái API trong cache.
+     * <p>
+     * Kết quả khớp với trạng thái mà {@code insertOrUpdateApi} sắp ghi xuống CSDL:
+     * API chưa từng thấy sẽ được chèn với mọi cờ bằng 0, còn API phát hiện thêm
+     * tham số mới sẽ bị reset {@code is_scanned} và {@code is_bypassed}. Nhờ vậy
+     * annotation giữ nguyên ngữ nghĩa cũ mà không cần truy vấn trên luồng HTTP.
+     */
+    private void applyAnnotations(HttpResponseReceived response, String method, String host, String path, Set<String> requestParams) {
+        if (!highlightEnabled && !noteEnabled) {
+            return;
+        }
+
+        DatabaseManager.ApiStatus status = statusCache.get(DatabaseManager.statusKey(method, host, path));
+        if (status == null) {
+            return; // API mới: mọi cờ sẽ là 0, không có gì để đánh dấu.
+        }
+
+        boolean hasNewParams = !status.knownParams.containsAll(requestParams);
+        boolean isScanned = !hasNewParams && status.scanned;
+        boolean isBypassed = !hasNewParams && status.bypassed;
+        boolean isRejected = status.rejected;
+
+        if (highlightEnabled && (isScanned || isBypassed)) {
+            response.annotations().setHighlightColor(HighlightColor.YELLOW);
+        }
+        if (noteEnabled) {
+            if (isScanned) {
+                response.annotations().setNotes("Scanned");
+            } else if (isBypassed) {
+                response.annotations().setNotes("Bypassed");
+            } else if (isRejected) {
+                response.annotations().setNotes("Rejected");
+            }
+        }
+    }
+
+    /**
+     * Đẩy một thao tác ghi CSDL sang luồng nền, rồi đồng bộ kết quả lên cache và giao diện.
+     * Chỉ dòng thực sự thay đổi được cập nhật, thay cho việc tải lại toàn bộ bảng.
+     *
+     * @param task Thao tác trả về dòng đã thay đổi, hoặc null nếu CSDL không đổi.
+     */
+    private void submitDbTask(Supplier<DatabaseManager.ApiUpdate> task) {
+        runOnDbThread(() -> {
+            DatabaseManager.ApiUpdate update = task.get();
+            if (update == null) {
+                return;
+            }
+            // Cập nhật cache ngay trên luồng CSDL để response kế tiếp thấy trạng thái mới nhất.
+            cacheStatus(update);
+            SwingUtilities.invokeLater(() -> updateOrInsertTableRow(update.row));
+        });
+    }
+
+    /**
+     * Đẩy một tác vụ sang luồng CSDL, bỏ qua im lặng nếu extension đang được gỡ bỏ.
+     * Burp có thể còn vài response dang dở sau khi executor đã shutdown; khi đó không
+     * được để RejectedExecutionException thoát ra luồng HTTP của Burp.
+     */
+    private void runOnDbThread(Runnable task) {
+        try {
+            dbExecutor.execute(task);
+        } catch (RejectedExecutionException e) {
+            // Extension đang unload, không còn gì để ghi nữa.
+        }
+    }
+
+    private void cacheStatus(DatabaseManager.ApiUpdate update) {
+        Object[] row = update.row;
+        statusCache.put(DatabaseManager.statusKey((String) row[0], (String) row[1], (String) row[2]), update.status);
+    }
+
+    /**
+     * Đồng bộ cờ trạng thái của một dòng trên bảng vào cache, sau khi người dùng tự tick
+     * checkbox. Tập tham số đã biết giữ nguyên vì thao tác này không đụng tới tham số.
+     * Chỉ được gọi trên EDT.
+     */
+    private void syncStatusCacheFromRow(int modelRow) {
+        String key = DatabaseManager.statusKey(
+                (String) tableModel.getValueAt(modelRow, 0),
+                (String) tableModel.getValueAt(modelRow, 1),
+                (String) tableModel.getValueAt(modelRow, 2));
+        DatabaseManager.ApiStatus previous = statusCache.get(key);
+        statusCache.put(key, new DatabaseManager.ApiStatus(
+                Boolean.TRUE.equals(tableModel.getValueAt(modelRow, 4)),
+                Boolean.TRUE.equals(tableModel.getValueAt(modelRow, 5)),
+                Boolean.TRUE.equals(tableModel.getValueAt(modelRow, 6)),
+                previous == null ? Set.of() : previous.knownParams));
+    }
+
+    /**
+     * Cập nhật một dòng đã có hoặc chèn một dòng mới vào JTable. Chỉ được gọi trên EDT.
+     */
+    private void updateOrInsertTableRow(Object[] rowData) {
+        Integer dbId = (Integer) rowData[8]; // Index của ID
+        Integer modelRowIndex = dbIdToModelRow.get(dbId);
+
+        // Những thay đổi dưới đây đến từ CSDL, không được ghi ngược trở lại CSDL.
+        suppressDbWrite = true;
+        try {
+            if (modelRowIndex != null) { // API đã có trên bảng -> cập nhật tại chỗ.
+                // Cột 3..7: Unscanned Params, Scanned, Rejected, Bypass, Repeater.
+                for (int column = 3; column <= 7; column++) {
+                    tableModel.setValueAt(rowData[column], modelRowIndex, column);
+                }
+            } else { // API mới -> chèn vào đầu bảng.
+                tableModel.insertRow(0, rowData);
+                // insertRow(0) đẩy mọi dòng cũ xuống một bậc, nên chỉ cần dịch map
+                // thay vì quét lại toàn bộ bảng.
+                dbIdToModelRow.replaceAll((id, modelRow) -> modelRow + 1);
+                dbIdToModelRow.put(dbId, 0);
+            }
+        } finally {
+            suppressDbWrite = false;
+        }
+        scheduleStatsUpdate();
+    }
+
+    /**
+     * Đọc toàn bộ dữ liệu từ CSDL trên luồng nền rồi đổ lên bảng.
+     * Chỉ dùng cho các mốc cần nạp lại toàn bộ: khởi động, Refresh, Apply, hoặc sau khi xoá.
+     */
+    private void reloadDataAsync() {
+        runOnDbThread(() -> {
+            List<Object[]> rows = databaseManager.loadApiData();
+            Map<String, DatabaseManager.ApiStatus> statuses = databaseManager.loadStatusIndex();
+            statusCache.clear();
+            statusCache.putAll(statuses);
+            SwingUtilities.invokeLater(() -> populateTable(rows));
+        });
+    }
+
+    /**
+     * Hẹn giờ tính lại thống kê, gom các thay đổi liên tiếp thành một lần chạy.
+     * <p>
+     * {@link #updateStats()} phải quét toàn bộ bảng, nên gọi trực tiếp sau mỗi ô bị đổi
+     * sẽ biến thao tác hàng loạt thành O(n²). Chỉ được gọi trên EDT.
+     */
+    private void scheduleStatsUpdate() {
+        if (statsRefreshTimer == null) {
+            statsRefreshTimer = new javax.swing.Timer(300, e -> updateStats());
+            statsRefreshTimer.setRepeats(false);
+        }
+        statsRefreshTimer.restart();
     }
 
     /**
@@ -276,55 +431,6 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
 
     /**
-     * Cập nhật một dòng đã có hoặc chèn một dòng mới vào JTable.
-     * @param rowData Dữ liệu trả về từ DatabaseManager, bao gồm cả ID.
-     */
-    private void updateOrInsertTableRow(Object[] rowData) {
-        int dbId = (int) rowData[8]; // Index của ID
-        Integer modelRowIndex = findModelRowByDbId(dbId);
-
-        if (modelRowIndex != null) { // API này đã tồn tại trên bảng -> cập nhật.
-            tableModel.setValueAt(rowData[3], modelRowIndex, 3); // Cập nhật cột Unscanned Params.
-            tableModel.setValueAt(rowData[4], modelRowIndex, 4); // Cập nhật cột Scanned.
-            tableModel.setValueAt(rowData[5], modelRowIndex, 5); // Cập nhật cột Rejected
-            tableModel.setValueAt(rowData[6], modelRowIndex, 6); // Cập nhật cột Bypass
-            tableModel.setValueAt(rowData[7], modelRowIndex, 7); // Cập nhật cột Repeater
-        } else { // API mới -> chèn vào đầu bảng.
-            tableModel.insertRow(0, rowData);
-            // Sau khi chèn, phải cập nhật lại toàn bộ map ánh xạ.
-            remapAllIndices();
-        }
-        updateStats();
-    }
-
-    /**
-     * Tìm chỉ số dòng trong TableModel (dữ liệu hiển thị) dựa trên ID trong CSDL.
-     * @param dbId ID duy nhất của dòng trong CSDL.
-     * @return Chỉ số dòng trên JTable, hoặc null nếu không tìm thấy.
-     */
-    private Integer findModelRowByDbId(int dbId) {
-        return modelRowToDbId.entrySet().stream()
-                .filter(entry -> entry.getValue().equals(dbId))
-                .map(Map.Entry::getKey)
-                .findFirst()
-                .orElse(null);
-    }
-
-    /**
-     * Ánh xạ lại toàn bộ chỉ số dòng trên JTable với ID trong CSDL.
-     * Cần được gọi mỗi khi có sự thay đổi về cấu trúc bảng (thêm/xóa dòng).
-     */
-    private void remapAllIndices() {
-        modelRowToDbId.clear();
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            Integer id = (Integer) tableModel.getValueAt(i, 8); // Index của ID
-            if (id != null) {
-                modelRowToDbId.put(i, id);
-            }
-        }
-    }
-
-    /**
      * Khởi tạo toàn bộ giao diện người dùng của extension.
      */
     private void createUI() {
@@ -376,53 +482,35 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
              */
             @Override
             public void setValueAt(Object aValue, int row, int col) {
-                // Tạm thời bỏ qua việc cập nhật UI từ chính logic bên trong (tránh lặp vô hạn).
-                if (!(Thread.currentThread().getStackTrace()[2].getMethodName().equals("updateOrInsertTableRow"))) {
-                    super.setValueAt(aValue, row, col); // Cập nhật giá trị trên UI trước.
-                } else {
-                     super.setValueAt(aValue, row, col);
-                     return;
+                super.setValueAt(aValue, row, col); // Cập nhật giá trị trên UI trước.
+
+                // Bỏ qua khi thay đổi đến từ việc đồng bộ CSDL lên bảng, để không ghi
+                // ngược xuống CSDL đúng những gì vừa đọc ra.
+                if (suppressDbWrite) {
+                    return;
                 }
 
-                // Chỉ xử lý các cột checkbox trạng thái.
+                // Chỉ xử lý các cột checkbox trạng thái "Rejected" (5) và "Bypass" (6).
                 if (col == 5 || col == 6) {
                     Integer id = (Integer) getValueAt(row, 8); // Lấy ID của dòng từ cột ẩn.
                     if (id != null) {
-                        // Logic đảm bảo chỉ 1 trong 3 checkbox (Scanned, Rejected, Bypassed) được chọn tại một thời điểm.
-                        if (Boolean.TRUE.equals(aValue)) {
-                            for (int i = 5; i <= 6; i++) {
-                                final boolean isChecked = (i == col);
-                                if (!isChecked) {
-                                    super.setValueAt(false, row, i); // Bỏ tick các ô khác trên UI.
-                                }
-                                // Cập nhật CSDL trong một luồng riêng.
-                                final int finalI = i;
-                                new Thread(() -> {
-                                    String dbColumn = switch (finalI) {
-                                        case 4 -> "is_scanned";
-                                        case 5 -> "is_rejected";
-                                        case 6 -> "is_bypassed";
-                                        default -> null;
-                                    };
-                                    if (dbColumn != null) {
-                                        databaseManager.updateApiStatus(id, dbColumn, isChecked);
-                                    }
-                                }).start();
-                            }
-                        } else {
-                             // Nếu người dùng bỏ tick một ô, cập nhật trạng thái đó trong CSDL.
-                            String dbColumn = switch (col) {
-                                case 5 -> "is_rejected";
-                                case 6 -> "is_bypassed";
-                                default -> null;
-                            };
-                             if (dbColumn != null) {
-                                 new Thread(() -> databaseManager.updateApiStatus(id, dbColumn, false)).start();
-                             }
+                        boolean isChecked = Boolean.TRUE.equals(aValue);
+                        int otherCol = (col == 5) ? 6 : 5;
+                        String dbColumn = (col == 5) ? "is_rejected" : "is_bypassed";
+                        String otherDbColumn = (col == 5) ? "is_bypassed" : "is_rejected";
+
+                        // Hai trạng thái loại trừ nhau: tick ô này thì bỏ tick ô kia.
+                        if (isChecked && Boolean.TRUE.equals(getValueAt(row, otherCol))) {
+                            super.setValueAt(false, row, otherCol);
+                            runOnDbThread(() -> databaseManager.updateApiStatus(id, otherDbColumn, false));
                         }
+                        runOnDbThread(() -> databaseManager.updateApiStatus(id, dbColumn, isChecked));
+
+                        // Giữ cache trạng thái khớp với bảng để highlight/note dùng đúng giá trị.
+                        syncStatusCacheFromRow(row);
                     }
                 }
-                updateStats(); // Cập nhật các nhãn thống kê.
+                scheduleStatsUpdate(); // Cập nhật các nhãn thống kê (gom lại, tránh quét bảng mỗi ô).
             }
         };
 
@@ -521,35 +609,43 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             ignored_parameter_rules = ignoredParameterRulesArea.getText().trim();
             compiledPathParameterRules = compilePathParameterRules(path_parameter_rules);
             compiledIgnoredParameterRules = compileIgnoredParameterRules(ignored_parameter_rules);
+            excludedStatusCodes = parseStatusCodes(exclude_status_code);
             autoBypassNoParam = autoBypassCheckBox.isSelected();
             saveSettings();
 
-            // Khởi tạo lại CSDL trước để đảm bảo đang làm việc với đúng file
-            databaseManager.close();
-            databaseManager.initialize(savedOutputPath);
+            // Toàn bộ thao tác CSDL chạy trên dbExecutor: vừa không treo giao diện,
+            // vừa không đụng độ với các tác vụ đang xử lý traffic.
+            applyButton.setEnabled(false);
+            final String dbPath = savedOutputPath;
+            final boolean normalizePaths = !compiledPathParameterRules.isEmpty();
+            final boolean cleanIgnoredParams = !compiledIgnoredParameterRules.isEmpty();
+            final boolean bypassOldRecords = autoBypassNoParam;
+            runOnDbThread(() -> {
+                // Mở lại CSDL trước để đảm bảo đang làm việc với đúng file.
+                databaseManager.reopen(dbPath);
 
-            // *** Áp dụng bypass cho dữ liệu cũ ***
-            if (!compiledPathParameterRules.isEmpty() || !compiledIgnoredParameterRules.isEmpty() || autoBypassNoParam) {
-                // Chạy trong một luồng riêng để không làm treo giao diện
-                new Thread(() -> {
-                    if (!compiledPathParameterRules.isEmpty()) {
-                        databaseManager.normalizeStoredPaths(this::normalizePath);
-                    }
-                    if (!compiledIgnoredParameterRules.isEmpty()) {
-                        databaseManager.removeIgnoredParameters(this::isIgnoredParameter);
-                    }
-                    if (autoBypassNoParam) {
-                        databaseManager.applyAutoBypassToOldRecords();
-                    }
-                    // Tải lại dữ liệu trên luồng giao diện sau khi cập nhật xong
-                    SwingUtilities.invokeLater(this::loadDataFromDb);
-                }).start();
-            } else {
-                // Nếu không bật, chỉ cần tải lại dữ liệu như bình thường
-                loadDataFromDb();
-            }
+                // *** Áp dụng chuẩn hoá path, loại tham số và bypass cho dữ liệu cũ ***
+                if (normalizePaths) {
+                    databaseManager.normalizeStoredPaths(this::normalizePath);
+                }
+                if (cleanIgnoredParams) {
+                    databaseManager.removeIgnoredParameters(this::isIgnoredParameter);
+                }
+                if (bypassOldRecords) {
+                    databaseManager.applyAutoBypassToOldRecords();
+                }
 
-            JOptionPane.showMessageDialog(null, "Settings applied and project reloaded from database.");
+                List<Object[]> rows = databaseManager.loadApiData();
+                Map<String, DatabaseManager.ApiStatus> statuses = databaseManager.loadStatusIndex();
+                statusCache.clear();
+                statusCache.putAll(statuses);
+                // Chỉ báo cho người dùng sau khi mọi thay đổi đã thực sự hoàn tất.
+                SwingUtilities.invokeLater(() -> {
+                    populateTable(rows);
+                    applyButton.setEnabled(true);
+                    JOptionPane.showMessageDialog(null, "Settings applied and project reloaded from database.");
+                });
+            });
         });
         tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightCheckBox, noteCheckBox, autoBypassCheckBox, applyButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl, excludeStatusCodesField, pathParameterRulesArea, ignoredParameterRulesArea));
         
@@ -559,7 +655,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         api.userInterface().registerSuiteTab("Recheck Scan", mainPanel);
         
         // Tải dữ liệu lần đầu.
-        loadDataFromDb();
+        reloadDataAsync();
     }
 
     /**
@@ -582,16 +678,15 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
     /**
      * Xóa dữ liệu cũ trên bảng và tải lại toàn bộ từ CSDL.
-     * Đồng thời cập nhật lại map `modelRowToDbId`.
+     * Đồng thời dựng lại map `dbIdToModelRow`.
      */
-    private void loadDataFromDb() {
+    private void populateTable(List<Object[]> rows) {
         tableModel.setRowCount(0);
-        modelRowToDbId.clear();
-        List<Object[]> rows = databaseManager.loadApiData();
+        dbIdToModelRow.clear();
         for (int i = 0; i < rows.size(); i++) {
             Object[] rowData = rows.get(i);
             tableModel.addRow(rowData);
-            modelRowToDbId.put(i, (Integer) rowData[8]); // Index của ID
+            dbIdToModelRow.put((Integer) rowData[8], i); // Index của ID
         }
         updateStats();
     }
@@ -948,14 +1043,20 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             return;
         }
 
+        // Thu thập id trước, rồi lấy tham số của tất cả bằng MỘT truy vấn thay vì
+        // một truy vấn cho mỗi dòng: với 5000 dòng chọn, cách cũ mất hơn một giây.
+        List<Integer> ids = new ArrayList<>(selectedViewRows.length);
+        for (int viewRow : selectedViewRows) {
+            ids.add((Integer) tableModel.getValueAt(table.convertRowIndexToModel(viewRow), 8));
+        }
+        Map<Integer, Set<String>> paramsById = databaseManager.getParamsByIds(ids);
+
         StringBuilder sb = new StringBuilder();
         for (int viewRow : selectedViewRows) {
             int modelRow = table.convertRowIndexToModel(viewRow);
             String method = String.valueOf(tableModel.getValueAt(modelRow, 0));
             String path = String.valueOf(tableModel.getValueAt(modelRow, 2));
-            int id = (int) tableModel.getValueAt(modelRow, 8);
-
-            Set<String> params = databaseManager.getAllParamsById(id);
+            Set<String> params = paramsById.getOrDefault(tableModel.getValueAt(modelRow, 8), Set.of());
 
             sb.append(method).append(" ").append(path);
             if (!params.isEmpty()) {
@@ -1003,8 +1104,14 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             return;
         }
 
-        databaseManager.deleteApisByIds(idsToDelete);
-        loadDataFromDb();
+        runOnDbThread(() -> {
+            databaseManager.deleteApisByIds(idsToDelete);
+            List<Object[]> rows = databaseManager.loadApiData();
+            Map<String, DatabaseManager.ApiStatus> statuses = databaseManager.loadStatusIndex();
+            statusCache.clear();
+            statusCache.putAll(statuses);
+            SwingUtilities.invokeLater(() -> populateTable(rows));
+        });
     }
 
     private boolean canApplyStatus(int modelRow, int statusColumn) {
@@ -1142,6 +1249,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             }
             compiledPathParameterRules = compilePathParameterRules(path_parameter_rules);
             compiledIgnoredParameterRules = compileIgnoredParameterRules(ignored_parameter_rules);
+            excludedStatusCodes = parseStatusCodes(exclude_status_code);
         } catch (Exception e) {
             api.logging().logToError("Failed to load settings: " + e.getMessage());
         }
@@ -1152,23 +1260,31 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
      * @return true nếu mã trạng thái nằm trong danh sách bị loại trừ, ngược lại là false.
      */
     private boolean isExcludedStatusCode(int statusCode) {
-        if (exclude_status_code == null || exclude_status_code.isBlank()) {
-            return false;
+        return excludedStatusCodes.contains(statusCode);
+    }
+
+    /**
+     * Phân tích chuỗi status code người dùng nhập thành tập hợp sẵn sàng tra cứu.
+     * Biên dịch một lần tại thời điểm Apply thay vì parse lại cho từng response.
+     */
+    private Set<Integer> parseStatusCodes(String rawStatusCodes) {
+        if (rawStatusCodes == null || rawStatusCodes.isBlank()) {
+            return Set.of();
         }
 
-        Set<Integer> excludedCodes = new HashSet<>();
-        try {
-            for (String s : exclude_status_code.split(",")) {
-                try {
-                    excludedCodes.add(Integer.parseInt(s.trim()));
-                } catch (NumberFormatException e) {
-                }
+        Set<Integer> codes = new HashSet<>();
+        for (String rawCode : rawStatusCodes.split(",")) {
+            String code = rawCode.trim();
+            if (code.isEmpty()) {
+                continue;
             }
-        } catch (Exception e) {
-            return false;
+            try {
+                codes.add(Integer.parseInt(code));
+            } catch (NumberFormatException e) {
+                api.logging().logToError("Invalid status code in exclude list: " + code);
+            }
         }
-
-        return excludedCodes.contains(statusCode);
+        return Set.copyOf(codes);
     }
     
     /**
@@ -1196,6 +1312,16 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
      */
     @Override
     public void extensionUnloaded() {
+        // Chờ các thao tác ghi đang dở hoàn tất để không mất dữ liệu, nhưng không chờ vô hạn.
+        dbExecutor.shutdown();
+        try {
+            if (!dbExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                dbExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            dbExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
         databaseManager.close();
     }
 }
