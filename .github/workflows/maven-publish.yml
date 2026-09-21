@@ -36,6 +36,20 @@ jobs:
       - name: List built JARs
         run: ls -lh target/*.jar
 
+      # Release được tạo trên GitHub (tag v*): đính kèm jar vào đúng release đó.
+      # Không truyền 'name' để giữ nguyên tiêu đề người dùng đã đặt.
+      - name: Upload JARs to the release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            target/RecheckScan.jar
+            target/RecheckScan-win-x64.jar
+            target/RecheckScan-linux-x64.jar
+            target/RecheckScan-mac-arm64.jar
+
+      # Chạy tay từ tab Actions: tự tạo một release mới rồi đính kèm jar.
       - name: Create Release and Upload JARs
         if: github.event_name == 'workflow_dispatch' && inputs.create_release == 'true'
         uses: softprops/action-gh-release@v2
