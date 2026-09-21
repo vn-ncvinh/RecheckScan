@@ -44,7 +44,7 @@ public class DatabaseManager {
      *
      * @param savedOutputPath Đường dẫn đến tệp CSDL do người dùng cấu hình. Nếu rỗng, một đường dẫn mặc định sẽ được sử dụng.
      */
-    public synchronized void initialize(String savedOutputPath) {
+    public void initialize(String savedOutputPath) {
         this.dbPath = getDbPath(savedOutputPath);
         try {
             // Nạp driver JDBC cho SQLite.
@@ -76,7 +76,7 @@ public class DatabaseManager {
      * @param savedOutputPath Đường dẫn thô từ cài đặt.
      * @return Đường dẫn tuyệt đối đã được chuẩn hóa.
      */
-    static String getDbPath(String savedOutputPath) {
+    private String getDbPath(String savedOutputPath) {
         if (savedOutputPath != null && !savedOutputPath.isBlank()) {
             // Hỗ trợ chuyển đổi từ định dạng .csv cũ sang .db mới
             String path = savedOutputPath.toLowerCase().endsWith(".csv")
@@ -118,75 +118,40 @@ public class DatabaseManager {
     }
 
     /**
-     * Đóng kết nối hiện tại rồi mở lại CSDL tại đường dẫn mới, trong cùng một lần khoá.
-     * Tránh khoảng trống giữa close() và initialize() mà luồng khác có thể chen vào
-     * và bắt gặp một connection đã đóng.
-     *
-     * @param savedOutputPath Đường dẫn tệp CSDL mới.
-     */
-    public synchronized void reopen(String savedOutputPath) {
-        close();
-        initialize(savedOutputPath);
-    }
-
-    /**
      * Tải tất cả dữ liệu API từ cơ sở dữ liệu để hiển thị trên JTable.
      * Sắp xếp theo ID giảm dần để các API mới nhất hiện lên đầu.
      *
      * @return Một danh sách các mảng Object, mỗi mảng đại diện cho một dòng trong bảng UI.
      */
-    public synchronized List<Object[]> loadApiData() {
+    public List<Object[]> loadApiData() {
         List<Object[]> rows = new ArrayList<>();
-        String sql = "SELECT id, method, host, path, unscanned_params, is_scanned, is_rejected, is_bypassed, is_from_repeater FROM api_log ORDER BY id DESC";
+        String sql = "SELECT id, method, host, path, unscanned_params, scanned_params, is_scanned, is_rejected, is_bypassed, is_from_repeater FROM api_log ORDER BY id DESC";
         try (Statement stmt = connection.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
-                rows.add(rowFromResultSet(rs));
+                String unscanned = rs.getString("unscanned_params");
+                
+                // Xây dựng chuỗi "unscanned_params" để hiển thị cho người dùng.
+                StringBuilder unscanned_params = new StringBuilder();
+                if (unscanned != null && !unscanned.isEmpty()) {
+                    unscanned_params.append(unscanned.replace("|", ", "));
+                }
+
+                rows.add(new Object[]{
+                        rs.getString("method"),
+                        rs.getString("host"),
+                        rs.getString("path"),
+                        unscanned_params.toString().trim(),
+                        rs.getBoolean("is_scanned"),
+                        rs.getBoolean("is_rejected"),
+                        rs.getBoolean("is_bypassed"),
+                        rs.getBoolean("is_from_repeater"),
+                        rs.getInt("id")
+                });
             }
         } catch (SQLException e) {
             api.logging().logToError("Failed to load API data from database: " + e.getMessage(), e);
         }
         return rows;
-    }
-
-    /**
-     * Đọc lại một API dưới dạng dòng dữ liệu cho JTable.
-     * Được dùng sau mỗi thao tác ghi để giao diện cập nhật đúng một dòng
-     * thay vì phải tải lại toàn bộ bảng.
-     *
-     * @return Mảng Object theo đúng thứ tự cột của bảng, hoặc null nếu API không tồn tại.
-     */
-    private Object[] rowFor(String method, String host, String path) throws SQLException {
-        String sql = "SELECT id, method, host, path, unscanned_params, is_scanned, is_rejected, is_bypassed, is_from_repeater FROM api_log WHERE host = ? AND path = ? AND method = ?";
-        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
-            stmt.setString(1, host);
-            stmt.setString(2, path);
-            stmt.setString(3, method);
-            try (ResultSet rs = stmt.executeQuery()) {
-                return rs.next() ? rowFromResultSet(rs) : null;
-            }
-        }
-    }
-
-    /**
-     * Dựng một dòng dữ liệu cho JTable từ ResultSet hiện tại.
-     * Thứ tự phải khớp với các cột khai báo trong RecheckScanApiExtension.
-     */
-    private static Object[] rowFromResultSet(ResultSet rs) throws SQLException {
-        String unscanned = rs.getString("unscanned_params");
-        // Xây dựng chuỗi "unscanned_params" để hiển thị cho người dùng.
-        String unscannedDisplay = unscanned == null ? "" : unscanned.replace("|", ", ").trim();
-
-        return new Object[]{
-                rs.getString("method"),
-                rs.getString("host"),
-                rs.getString("path"),
-                unscannedDisplay,
-                rs.getBoolean("is_scanned"),
-                rs.getBoolean("is_rejected"),
-                rs.getBoolean("is_bypassed"),
-                rs.getBoolean("is_from_repeater"),
-                rs.getInt("id")
-        };
     }
 
     /**
@@ -198,7 +163,7 @@ public class DatabaseManager {
      * @param host          Host của request.
      * @param path          Path của request.
      * @param requestParams Tập hợp các tham số từ request hiện tại.
-     * @return Dòng dữ liệu mới của API nếu CSDL có thay đổi, ngược lại null.
+     * @return Mảng Object chứa 3 giá trị boolean [isScanned, isRejected, isBypassed] sau khi cập nhật, hoặc null nếu lỗi.
      */
     public synchronized Object[] insertOrUpdateApi(String method, String host, String path, Set<String> requestParams) {
         String selectSql = "SELECT unscanned_params, scanned_params FROM api_log WHERE host = ? AND path = ? AND method = ?";
@@ -220,21 +185,18 @@ public class DatabaseManager {
                 Set<String> newDiscoveredParams = new HashSet<>(requestParams);
                 newDiscoveredParams.removeAll(knownParams);
 
-                // Không có param mới -> không đụng vào CSDL, cũng không cần cập nhật giao diện.
-                if (newDiscoveredParams.isEmpty()) {
-                    return null;
-                }
-
-                // Có param mới: thêm vào danh sách unscanned và reset trạng thái is_scanned.
-                unscannedSet.addAll(newDiscoveredParams);
-                String updatedUnscannedParams = setToString(unscannedSet);
-                String updateSql = "UPDATE api_log SET unscanned_params = ?, is_scanned = 0, is_bypassed = 0, last_seen = CURRENT_TIMESTAMP WHERE host = ? AND path = ? AND method = ?";
-                try (PreparedStatement updateStmt = connection.prepareStatement(updateSql)) {
-                    updateStmt.setString(1, updatedUnscannedParams);
-                    updateStmt.setString(2, host);
-                    updateStmt.setString(3, path);
-                    updateStmt.setString(4, method);
-                    updateStmt.executeUpdate();
+                // Nếu có param mới, thêm vào danh sách unscanned và reset trạng thái is_scanned.
+                if (!newDiscoveredParams.isEmpty()) {
+                    unscannedSet.addAll(newDiscoveredParams);
+                    String updatedUnscannedParams = setToString(unscannedSet);
+                    String updateSql = "UPDATE api_log SET unscanned_params = ?, is_scanned = 0, is_bypassed = 0, last_seen = CURRENT_TIMESTAMP WHERE host = ? AND path = ? AND method = ?";
+                    try (PreparedStatement updateStmt = connection.prepareStatement(updateSql)) {
+                        updateStmt.setString(1, updatedUnscannedParams);
+                        updateStmt.setString(2, host);
+                        updateStmt.setString(3, path);
+                        updateStmt.setString(4, method);
+                        updateStmt.executeUpdate();
+                    }
                 }
             } else { // API mới -> Chèn dòng mới
                 String paramsStr = setToString(requestParams);
@@ -247,11 +209,11 @@ public class DatabaseManager {
                     insertStmt.executeUpdate();
                 }
             }
-            return rowFor(method, host, path);
         } catch (SQLException e) {
             api.logging().logToError("Error during insert/update API: " + e.getMessage(), e);
             return null;
         }
+        return getApiStatus(method, host, path);
     }
 
     /**
@@ -263,9 +225,9 @@ public class DatabaseManager {
      * @param host          Host của request.
      * @param path          Path của request.
      * @param scannerParams Các tham số có trong request của Scanner.
-     * @return Dòng dữ liệu mới của API nếu CSDL có thay đổi, ngược lại null.
+     * @return true nếu có sự thay đổi trong CSDL, ngược lại false.
      */
-    public synchronized Object[] processScannedParameters(String method, String host, String path, Set<String> scannerParams) {
+    public synchronized boolean processScannedParameters(String method, String host, String path, Set<String> scannerParams) {
         String selectSql = "SELECT unscanned_params, scanned_params FROM api_log WHERE host = ? AND path = ? AND method = ?";
         try (PreparedStatement selectStmt = connection.prepareStatement(selectSql)) {
             selectStmt.setString(1, host);
@@ -275,12 +237,12 @@ public class DatabaseManager {
 
             if (rs.next()) {
                 Set<String> unscannedDbSet = stringToSet(rs.getString("unscanned_params"));
-                if (unscannedDbSet.isEmpty()) return null; // Không có gì để quét.
+                if (unscannedDbSet.isEmpty()) return false; // Không có gì để quét.
 
                 // Tìm các tham số vừa được quét (phần giao giữa param của scanner và param chưa quét).
                 Set<String> newlyScannedParams = new HashSet<>(scannerParams);
                 newlyScannedParams.retainAll(unscannedDbSet);
-                if (newlyScannedParams.isEmpty()) return null; // Scanner không quét trúng param nào cần thiết.
+                if (newlyScannedParams.isEmpty()) return false; // Scanner không quét trúng param nào cần thiết.
 
                 // Cập nhật lại các tập hợp param.
                 Set<String> scannedDbSet = stringToSet(rs.getString("scanned_params"));
@@ -288,35 +250,49 @@ public class DatabaseManager {
                 scannedDbSet.addAll(newlyScannedParams);
 
                 // Cập nhật CSDL với trạng thái mới.
-                String updateSql = "UPDATE api_log SET unscanned_params = ?, scanned_params = ?, is_scanned = ?, last_seen = CURRENT_TIMESTAMP WHERE host = ? AND path = ? AND method = ?";
+                // Khi đã scan xong toàn bộ params, clear các trạng thái loại trừ để tránh một API
+                // vừa là scanned vừa là rejected/bypassed.
+                boolean isFullyScanned = unscannedDbSet.isEmpty();
+                String updateSql = """
+                        UPDATE api_log
+                        SET unscanned_params = ?,
+                            scanned_params = ?,
+                            is_scanned = ?,
+                            is_rejected = CASE WHEN ? THEN 0 ELSE is_rejected END,
+                            is_bypassed = CASE WHEN ? THEN 0 ELSE is_bypassed END,
+                            last_seen = CURRENT_TIMESTAMP
+                        WHERE host = ? AND path = ? AND method = ?
+                        """;
                 try (PreparedStatement updateStmt = connection.prepareStatement(updateSql)) {
                     updateStmt.setString(1, setToString(unscannedDbSet));
                     updateStmt.setString(2, setToString(scannedDbSet));
-                    updateStmt.setBoolean(3, unscannedDbSet.isEmpty()); // is_scanned = true chỉ khi không còn gì để quét.
-                    updateStmt.setString(4, host);
-                    updateStmt.setString(5, path);
-                    updateStmt.setString(6, method);
+                    updateStmt.setBoolean(3, isFullyScanned); // is_scanned = true chỉ khi không còn gì để quét.
+                    updateStmt.setBoolean(4, isFullyScanned);
+                    updateStmt.setBoolean(5, isFullyScanned);
+                    updateStmt.setString(6, host);
+                    updateStmt.setString(7, path);
+                    updateStmt.setString(8, method);
                     updateStmt.executeUpdate();
+                    return true;
                 }
-                return rowFor(method, host, path);
             }
         } catch (SQLException e) {
             api.logging().logToError("Error during processScannedParameters: " + e.getMessage(), e);
         }
-        return null;
+        return false;
     }
     
     /**
-     * Xử lý tính năng auto-bypass cho API không có tham số, áp dụng cho mọi HTTP method.
+     * Xử lý tính năng auto-bypass cho API GET không có tham số.
      * Sử dụng ON CONFLICT để tránh ghi đè các API đã được đánh dấu `scanned` hoặc `rejected`
      * Đồng thời đảm bảo không đánh dấu bypass nếu API đó còn param chưa được scan
      *
-     * @param method Phương thức HTTP của request.
+     * @param method Phương thức HTTP (luôn là GET).
      * @param host   Host của API.
      * @param path   Path của API.
-     * @return Dòng dữ liệu mới của API, hoặc null nếu thao tác thất bại.
+     * @return true nếu có sự thay đổi trong CSDL.
      */
-    public synchronized Object[] autoBypassApi(String method, String host, String path) {
+    public synchronized boolean autoBypassApi(String method, String host, String path) {
         String upsertSql = """
             INSERT INTO api_log (method, host, path, unscanned_params, scanned_params, is_bypassed)
             VALUES (?, ?, ?, '', '', 1)
@@ -332,11 +308,10 @@ public class DatabaseManager {
             stmt.setString(1, method);
             stmt.setString(2, host);
             stmt.setString(3, path);
-            stmt.executeUpdate();
-            return rowFor(method, host, path);
+            return stmt.executeUpdate() > 0;
         } catch (SQLException e) {
             api.logging().logToError("Error during autoBypassApi: " + e.getMessage(), e);
-            return null;
+            return false;
         }
     }
 
@@ -347,55 +322,29 @@ public class DatabaseManager {
      * @param method Phương thức HTTP.
      * @param host   Host của API.
      * @param path   Path của API.
-     * @return Dòng dữ liệu mới của API nếu cờ vừa được bật, ngược lại null.
+     * @return true nếu có sự thay đổi trong CSDL, ngược lại false.
      */
-    public synchronized Object[] updateRepeaterStatus(String method, String host, String path) {
+    public synchronized boolean updateRepeaterStatus(String method, String host, String path) {
         String sql = "UPDATE api_log SET is_from_repeater = 1, last_seen = CURRENT_TIMESTAMP WHERE host = ? AND path = ? AND method = ? AND is_from_repeater = 0";
         try (PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, host);
             stmt.setString(2, path);
             stmt.setString(3, method);
-            if (stmt.executeUpdate() == 0) {
-                return null;
-            }
-            return rowFor(method, host, path);
+            int affectedRows = stmt.executeUpdate();
+            return affectedRows > 0;
         } catch (SQLException e) {
             api.logging().logToError("Error during updateRepeaterStatus: " + e.getMessage(), e);
-            return null;
+            return false;
         }
     }
     
-    /**
-     * Lấy tất cả tham số (cả unscanned và scanned) của một API dựa trên id.
-     * Các tham số được hợp nhất và loại bỏ trùng lặp.
-     *
-     * @param id ID duy nhất của dòng trong CSDL.
-     * @return Một Set chứa tất cả tên tham số, hoặc empty set nếu không tìm thấy.
-     */
-    public synchronized Set<String> getAllParamsById(int id) {
-        String sql = "SELECT unscanned_params, scanned_params FROM api_log WHERE id = ?";
-        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
-            stmt.setInt(1, id);
-            ResultSet rs = stmt.executeQuery();
-            if (rs.next()) {
-                Set<String> allParams = new HashSet<>();
-                allParams.addAll(stringToSet(rs.getString("unscanned_params")));
-                allParams.addAll(stringToSet(rs.getString("scanned_params")));
-                return allParams;
-            }
-        } catch (SQLException e) {
-            api.logging().logToError("Failed to get params by id: " + e.getMessage(), e);
-        }
-        return new HashSet<>();
-    }
-
     /**
      * Chuyển đổi một chuỗi (dữ liệu từ DB) thành một Set các chuỗi.
      *
      * @param str Chuỗi được phân tách bởi '|'.
      * @return Một Set các tham số.
      */
-    static Set<String> stringToSet(String str) {
+    private Set<String> stringToSet(String str) {
         if (str == null || str.isBlank()) return new HashSet<>();
         return new HashSet<>(Arrays.asList(str.split("\\|")));
     }
@@ -407,18 +356,11 @@ public class DatabaseManager {
      * @param set Tập hợp các tham số.
      * @return Một chuỗi được phân tách bởi '|'.
      */
-    static String setToString(Set<String> set) {
+    private String setToString(Set<String> set) {
         if (set == null || set.isEmpty()) return "";
         return set.stream().sorted().collect(Collectors.joining("|"));
     }
 
-    /**
-     * Xoá khỏi các bản ghi cũ mọi tham số khớp rule "ignored parameter".
-     * Được gọi khi người dùng bấm Apply để dữ liệu đã lưu khớp với cấu hình mới.
-     *
-     * @param ignoredParameterPredicate Vị từ xác định một tên tham số có bị loại hay không.
-     * @return Số bản ghi đã được cập nhật.
-     */
     public synchronized int removeIgnoredParameters(Predicate<String> ignoredParameterPredicate) {
         if (ignoredParameterPredicate == null) {
             return 0;
@@ -432,7 +374,6 @@ public class DatabaseManager {
             while (rs.next()) {
                 Set<String> unscannedParams = stringToSet(rs.getString("unscanned_params"));
                 Set<String> scannedParams = stringToSet(rs.getString("scanned_params"));
-                // Dùng '|' chứ không phải '||' để cả hai vế đều được thực thi.
                 boolean changed = unscannedParams.removeIf(ignoredParameterPredicate)
                         | scannedParams.removeIf(ignoredParameterPredicate);
 
@@ -496,26 +437,6 @@ public class DatabaseManager {
             this.unscannedParams = unscannedParams;
             this.scannedParams = scannedParams;
             this.isFullyScanned = isFullyScanned;
-        }
-    }
-
-    /**
-     * Xoá hẳn các API khỏi CSDL theo danh sách ID.
-     *
-     * @return Số dòng đã bị xoá.
-     */
-    public synchronized int deleteApisByIds(List<Integer> ids) {
-        if (ids == null || ids.isEmpty()) return 0;
-        String placeholders = ids.stream().map(id -> "?").collect(Collectors.joining(","));
-        String sql = "DELETE FROM api_log WHERE id IN (" + placeholders + ")";
-        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
-            for (int i = 0; i < ids.size(); i++) {
-                stmt.setInt(i + 1, ids.get(i));
-            }
-            return stmt.executeUpdate();
-        } catch (SQLException e) {
-            api.logging().logToError("Failed to delete APIs: " + e.getMessage(), e);
-            return 0;
         }
     }
 
@@ -728,7 +649,7 @@ public class DatabaseManager {
      * @param columnName Tên của cột cần cập nhật.
      * @param value      Giá trị boolean mới.
      */
-    public synchronized void updateApiStatus(int id, String columnName, boolean value) {
+    public void updateApiStatus(int id, String columnName, boolean value) {
         if (!Arrays.asList("is_scanned", "is_rejected", "is_bypassed").contains(columnName)) {
             api.logging().logToError("Invalid column name for status update.");
             return;
@@ -744,10 +665,31 @@ public class DatabaseManager {
     }
 
     /**
+     * Xóa nhiều bản ghi API khỏi cơ sở dữ liệu dựa trên danh sách ID.
+     *
+     * @param ids Danh sách các ID cần xóa.
+     * @return Số lượng dòng đã được xóa.
+     */
+    public synchronized int deleteApisByIds(List<Integer> ids) {
+        if (ids == null || ids.isEmpty()) return 0;
+        String placeholders = ids.stream().map(id -> "?").collect(Collectors.joining(","));
+        String sql = "DELETE FROM api_log WHERE id IN (" + placeholders + ")";
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            for (int i = 0; i < ids.size(); i++) {
+                stmt.setInt(i + 1, ids.get(i));
+            }
+            return stmt.executeUpdate();
+        } catch (SQLException e) {
+            api.logging().logToError("Failed to delete APIs: " + e.getMessage(), e);
+            return 0;
+        }
+    }
+
+    /**
      * Đóng kết nối cơ sở dữ liệu khi extension được gỡ bỏ.
      * Rất quan trọng để giải phóng tài nguyên.
      */
-    public synchronized void close() {
+    public void close() {
         try {
             if (connection != null && !connection.isClosed()) {
                 connection.close();
@@ -756,5 +698,47 @@ public class DatabaseManager {
         } catch (SQLException e) {
             api.logging().logToError("Error closing database connection: " + e.getMessage(), e);
         }
+    }
+    
+    public synchronized Set<String> getAllParamsById(int id) {
+        String sql = "SELECT unscanned_params, scanned_params FROM api_log WHERE id = ?";
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setInt(1, id);
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) {
+                Set<String> params = new HashSet<>();
+                params.addAll(stringToSet(rs.getString("unscanned_params")));
+                params.addAll(stringToSet(rs.getString("scanned_params")));
+                return params;
+            }
+        } catch (SQLException e) {
+            api.logging().logToError("Failed to get all params by id: " + e.getMessage(), e);
+        }
+        return Collections.emptySet();
+    }
+
+    /**
+     * Lấy các cờ trạng thái (scanned, rejected, bypassed) của một API cụ thể.
+     * Được sử dụng để quyết định việc highlight và thêm note.
+     *
+     * @param method Phương thức HTTP.
+     * @param host   Host của API.
+     * @param path   Path của API.
+     * @return Một mảng Object chứa 3 giá trị boolean, hoặc null nếu không tìm thấy.
+     */
+    public Object[] getApiStatus(String method, String host, String path) {
+        String sql = "SELECT is_scanned, is_rejected, is_bypassed FROM api_log WHERE host = ? AND path = ? AND method = ?";
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, host);
+            stmt.setString(2, path);
+            stmt.setString(3, method);
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) {
+                return new Object[]{rs.getBoolean("is_scanned"), rs.getBoolean("is_rejected"), rs.getBoolean("is_bypassed")};
+            }
+        } catch (SQLException e) {
+            api.logging().logToError("Failed to get API status for " + host + path + ": " + e.getMessage(), e);
+        }
+        return null;
     }
 }
