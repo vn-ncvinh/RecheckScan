@@ -22,6 +22,8 @@ public class SettingsPanel {
      * @param highlightCheckBox Checkbox để bật/tắt highlight.
      * @param noteCheckBox Checkbox để bật/tắt thêm note.
      * @param autoBypassCheckBox Checkbox để bật/tắt tự động bypass.
+     * @param autoAnnotateHistoryCheckBox Checkbox để bật/tắt tự động sửa highlight/note trong Proxy history.
+     * @param annotationBatchField Ô nhập số API tối thiểu trong hàng chờ để chạy một lượt quét.
      * @param applyButton Nút để áp dụng và lưu cài đặt.
      * @param totalLbl, scannedLbl, etc. Các nhãn để hiển thị thống kê.
      * @param excludeStatusCodesField Trường nhập các status code cần loại trừ.
@@ -36,6 +38,8 @@ public class SettingsPanel {
             JCheckBox  highlightCheckBox,
             JCheckBox  noteCheckBox,
             JCheckBox  autoBypassCheckBox,
+            JCheckBox  autoAnnotateHistoryCheckBox,
+            JTextField annotationBatchField,
             JButton    applyButton,
             JLabel     totalLbl,
             JLabel     scannedLbl,
@@ -165,6 +169,16 @@ public class SettingsPanel {
         controlsPanel.add(highlightCheckBox);
         controlsPanel.add(noteCheckBox);
         controlsPanel.add(autoBypassCheckBox);
+
+        // Checkbox sửa history + ô nhập ngưỡng hàng chờ nằm cùng một dòng.
+        JPanel autoAnnotatePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        autoAnnotatePanel.add(autoAnnotateHistoryCheckBox);
+        autoAnnotatePanel.add(new JLabel("  queue threshold: "));
+        autoAnnotatePanel.add(annotationBatchField);
+        autoAnnotatePanel.add(new JLabel(" APIs"));
+        autoAnnotatePanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        autoAnnotatePanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, autoAnnotatePanel.getPreferredSize().height));
+        controlsPanel.add(autoAnnotatePanel);
         
         centerPanel.add(controlsPanel);
 

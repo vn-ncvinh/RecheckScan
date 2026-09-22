@@ -1,6 +1,7 @@
 package com.example;
 
 import burp.api.montoya.*;
+import burp.api.montoya.core.Annotations;
 import burp.api.montoya.core.HighlightColor;
 import burp.api.montoya.core.ToolType;
 import burp.api.montoya.http.message.ContentType;
@@ -8,6 +9,7 @@ import burp.api.montoya.extension.ExtensionUnloadingHandler;
 import burp.api.montoya.http.handler.*;
 import burp.api.montoya.http.message.params.*;
 import burp.api.montoya.http.message.requests.HttpRequest;
+import burp.api.montoya.proxy.ProxyHttpRequestResponse;
 
 import javax.swing.*;
 import javax.swing.event.DocumentEvent;
@@ -21,6 +23,11 @@ import java.io.StringWriter;
 import java.util.*;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 import java.util.stream.Collectors;
@@ -54,9 +61,30 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     private boolean highlightEnabled = false;
     private boolean noteEnabled = false;
     private boolean autoBypassNoParam = false;
+    /** Tự động sửa lại highlight/note của proxy history khi trạng thái API đổi. */
+    private boolean autoAnnotateHistory = false;
+    /** Ngưỡng hàng chờ: dưới mức này thì bỏ qua lượt quét, đợi lượt sau. */
+    private int annotationSweepMinBatch = ANNOTATION_SWEEP_DEFAULT_MIN_BATCH;
     private List<PathParameterRule> compiledPathParameterRules = new ArrayList<>();
     private List<Pattern> compiledIgnorePathParameterRules = new ArrayList<>();
     private List<Pattern> compiledIgnoreParamRules = new ArrayList<>();
+
+    /** Chu kỳ quét proxy history để annotate lại các API vừa đổi trạng thái. */
+    private static final long ANNOTATION_SWEEP_INTERVAL_SECONDS = 30;
+    /**
+     * Mặc định cho số API tối thiểu trong hàng chờ mới đáng một lượt quét.
+     * Mỗi lượt quét phải duyệt TOÀN BỘ history (Montoya không có API lấy N item gần nhất),
+     * nên gom nhiều thay đổi vào một lượt rẻ hơn rất nhiều lần quét lẻ.
+     */
+    private static final int ANNOTATION_SWEEP_DEFAULT_MIN_BATCH = 10;
+    /** Các note do extension này tạo ra - chỉ những giá trị này mới được phép ghi đè. */
+    private static final Set<String> MANAGED_NOTES = Set.of("Scanned", "Bypassed", "Rejected");
+
+    /** Hàng chờ các API vừa đổi trạng thái, chờ annotate lại trong history. */
+    private final Set<String> pendingAnnotationKeys = ConcurrentHashMap.newKeySet();
+    /** Đảm bảo không có hai lượt quét history chạy song song. */
+    private final AtomicBoolean annotationSweepRunning = new AtomicBoolean(false);
+    private ScheduledExecutorService annotationSweeper;
 
     /**
      * Model cho JTable, chứa dữ liệu API được hiển thị trên giao diện.
@@ -96,6 +124,15 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
         // Tạo giao diện người dùng trên luồng Event Dispatch Thread (EDT) của Swing để đảm bảo an toàn luồng.
         SwingUtilities.invokeLater(this::createUI);
+
+        // Bộ quét định kỳ: annotate lại history cho các API đã đổi trạng thái.
+        annotationSweeper = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "RecheckScan-annotation-sweeper");
+            thread.setDaemon(true);
+            return thread;
+        });
+        annotationSweeper.scheduleWithFixedDelay(this::sweepPendingAnnotations,
+                ANNOTATION_SWEEP_INTERVAL_SECONDS, ANNOTATION_SWEEP_INTERVAL_SECONDS, TimeUnit.SECONDS);
 
         // Đăng ký HttpHandler để xử lý các request/response đi qua Burp.
         api.http().registerHttpHandler(new HttpHandler() {
@@ -137,6 +174,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                         boolean updated = databaseManager.processScannedParameters(method, host, path, requestParams);
                         // Nếu CSDL có thay đổi, tải lại dữ liệu trên giao diện.
                         if (updated) {
+                            queueAnnotationUpdate(method, host, path);
                             SwingUtilities.invokeLater(RecheckScanApiExtension.this::loadDataFromDb);
                         }
                     }).start();
@@ -159,6 +197,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                         new Thread(() -> {
                             boolean updated = databaseManager.autoBypassApi(method, host, path);
                             if (updated) {
+                                queueAnnotationUpdate(method, host, path);
                                 SwingUtilities.invokeLater(RecheckScanApiExtension.this::loadDataFromDb);
                             }
                         }).start();
@@ -168,7 +207,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                     } else {
                         // Nhánh 2b: Xử lý request thông thường để tìm và ghi nhận tham số mới.
                         new Thread(() -> {
-                            databaseManager.insertOrUpdateApi(method, host, path, requestParams);
+                            if (databaseManager.insertOrUpdateApi(method, host, path, requestParams)) {
+                                queueAnnotationUpdate(method, host, path);
+                            }
                             // Tải lại UI để phản ánh thay đổi (nếu có param mới được thêm).
                             SwingUtilities.invokeLater(RecheckScanApiExtension.this::loadDataFromDb);
                         }).start();
@@ -257,6 +298,228 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         return allParamNames;
     }
 
+
+    /**
+     * Popup tiến trình cho lần quét history khi bấm Apply.
+     * Nút OK bị vô hiệu cho tới khi lượt quét kết thúc.
+     */
+    private static class HistoryProgressDialog extends JDialog {
+        private final JLabel messageLabel = new JLabel("Đang xử lý Proxy history, vui lòng đợi...");
+        private final JButton okButton = new JButton("OK");
+
+        HistoryProgressDialog(Window owner) {
+            super(owner, "Recheck Scan", ModalityType.APPLICATION_MODAL);
+            okButton.setEnabled(false);
+            okButton.addActionListener(e -> dispose());
+
+            JPanel content = new JPanel(new BorderLayout(10, 15));
+            content.setBorder(BorderFactory.createEmptyBorder(20, 20, 15, 20));
+            content.add(messageLabel, BorderLayout.CENTER);
+
+            JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 0, 0));
+            buttonPanel.add(okButton);
+            content.add(buttonPanel, BorderLayout.SOUTH);
+
+            setContentPane(content);
+            setDefaultCloseOperation(DISPOSE_ON_CLOSE);
+            pack();
+            setLocationRelativeTo(owner);
+        }
+
+        /** Gọi trên EDT khi lượt quét đã xong: đổi thông báo và bật nút OK. */
+        void markDone(String message) {
+            messageLabel.setText(message);
+            okButton.setEnabled(true);
+            pack();
+            setLocationRelativeTo(getOwner());
+        }
+    }
+
+    /**
+     * Xếp một API vừa đổi trạng thái vào hàng chờ annotate lại proxy history.
+     * Chỉ ghi nhận key (rẻ), việc quét history do {@link #sweepPendingAnnotations()} làm theo lô.
+     */
+    private void queueAnnotationUpdate(String method, String host, String path) {
+        if (!isHistoryAnnotationEnabled()) {
+            return; // Option tắt, hoặc không bật highlight/note -> không cần theo dõi.
+        }
+        if (method == null || host == null || path == null) {
+            return;
+        }
+        pendingAnnotationKeys.add(DatabaseManager.stateKey(method, host, path));
+    }
+
+    /**
+     * Chạy mỗi {@link #ANNOTATION_SWEEP_INTERVAL_SECONDS} giây trên luồng nền.
+     * Hàng chờ dưới {@link #ANNOTATION_SWEEP_MIN_BATCH} API thì bỏ qua, đợi lượt sau:
+     * một lượt quét phải duyệt toàn bộ history nên quét cho vài API là quá đắt.
+     */
+    private void sweepPendingAnnotations() {
+        try {
+            if (!isHistoryAnnotationEnabled()) {
+                pendingAnnotationKeys.clear();
+                return;
+            }
+            if (pendingAnnotationKeys.size() < annotationSweepMinBatch) {
+                return;
+            }
+            // Tách lô ra khỏi hàng chờ để các thay đổi mới trong lúc quét không bị mất.
+            Set<String> batch = new HashSet<>(pendingAnnotationKeys);
+            pendingAnnotationKeys.removeAll(batch);
+            runAnnotationSweep(batch);
+        } catch (Throwable t) {
+            // Không để exception làm chết luôn scheduler.
+            api.logging().logToError("Annotation sweep failed: " + t.getMessage());
+        }
+    }
+
+    /**
+     * Quét proxy history và annotate lại theo trạng thái mới nhất trong CSDL.
+     *
+     * @param targetKeys Chỉ xử lý các API này; null = quét toàn bộ (dùng khi bấm Apply).
+     * @return Số item history đã cập nhật, hoặc -1 nếu lượt quét không chạy được.
+     */
+    private int runAnnotationSweep(Set<String> targetKeys) {
+        if (!isHistoryAnnotationEnabled()) {
+            return -1;
+        }
+        if (!annotationSweepRunning.compareAndSet(false, true)) {
+            // Lượt trước chưa xong -> trả key về hàng chờ, bỏ qua nhịp này.
+            if (targetKeys != null) {
+                pendingAnnotationKeys.addAll(targetKeys);
+            }
+            return -1;
+        }
+        try {
+            long startedAt = System.currentTimeMillis();
+            int annotated = annotateHistory(targetKeys);
+            api.logging().logToOutput(String.format(
+                    "Re-annotated %d proxy history entries for %s in %d ms.",
+                    annotated,
+                    targetKeys == null ? "all APIs" : targetKeys.size() + " changed API(s)",
+                    System.currentTimeMillis() - startedAt));
+            return annotated;
+        } catch (Throwable t) {
+            if (targetKeys != null) {
+                pendingAnnotationKeys.addAll(targetKeys); // thử lại ở lượt sau
+            }
+            api.logging().logToError("Failed to re-annotate proxy history: " + t.getMessage());
+            return -1;
+        } finally {
+            annotationSweepRunning.set(false);
+        }
+    }
+
+    /**
+     * Đọc ngưỡng hàng chờ do người dùng nhập. Giá trị không hợp lệ hoặc nhỏ hơn 1
+     * sẽ quay về mặc định thay vì làm hỏng lịch quét.
+     */
+    private int parseSweepBatchSize(String rawValue) {
+        if (rawValue != null && !rawValue.isBlank()) {
+            try {
+                int parsed = Integer.parseInt(rawValue.trim());
+                if (parsed >= 1) {
+                    return parsed;
+                }
+                api.logging().logToError("History sweep batch size must be >= 1, falling back to "
+                        + ANNOTATION_SWEEP_DEFAULT_MIN_BATCH + ": " + rawValue);
+                return ANNOTATION_SWEEP_DEFAULT_MIN_BATCH;
+            } catch (NumberFormatException e) {
+                api.logging().logToError("Invalid history sweep batch size, falling back to "
+                        + ANNOTATION_SWEEP_DEFAULT_MIN_BATCH + ": " + rawValue);
+            }
+        }
+        return ANNOTATION_SWEEP_DEFAULT_MIN_BATCH;
+    }
+
+    /**
+     * Việc sửa lại history chỉ có ý nghĩa khi option được bật VÀ có thứ để ghi (highlight hoặc note).
+     */
+    private boolean isHistoryAnnotationEnabled() {
+        return autoAnnotateHistory && (highlightEnabled || noteEnabled);
+    }
+
+    /**
+     * Duyệt proxy history MỘT lượt và cập nhật highlight/note cho các item khớp.
+     * Trạng thái được nạp bằng một truy vấn duy nhất rồi tra trong bộ nhớ.
+     *
+     * @param targetKeys Chỉ xử lý các API này; null = mọi API có trong CSDL.
+     * @return Số item trong history đã được cập nhật.
+     */
+    private int annotateHistory(Set<String> targetKeys) {
+        if (targetKeys != null && targetKeys.isEmpty()) {
+            return 0;
+        }
+        Map<String, boolean[]> states = databaseManager.loadAllStates();
+        if (states.isEmpty()) {
+            return 0;
+        }
+
+        int annotated = 0;
+        for (ProxyHttpRequestResponse item : api.proxy().history()) {
+            // Dùng request() thay cho item.method()/host()/path() (đã deprecated for removal),
+            // đồng thời khớp đúng cách tính key của HttpHandler.
+            HttpRequest request = item.request();
+            if (request == null) {
+                continue;
+            }
+            String rawPath = request.pathWithoutQuery();
+            if (rawPath == null || rawPath.isEmpty()) {
+                continue;
+            }
+            String key = DatabaseManager.stateKey(request.method(), request.httpService().host(), normalizePath(rawPath));
+            if (targetKeys != null && !targetKeys.contains(key)) {
+                continue;
+            }
+            // Không có trong CSDL nghĩa là API chưa từng được ghi nhận (ngoài scope, bị loại trừ...).
+            boolean[] state = states.get(key);
+            if (state == null) {
+                continue;
+            }
+            if (applyAnnotations(item.annotations(), state)) {
+                annotated++;
+            }
+        }
+        return annotated;
+    }
+
+    /**
+     * Ghi highlight/note cho một item history theo trạng thái của API.
+     * <p>
+     * Chỉ ghi đè những gì extension tự đặt: màu YELLOW và các note trong
+     * {@link #MANAGED_NOTES}. Highlight màu khác hoặc note do người dùng tự viết
+     * luôn được giữ nguyên. Nếu API không còn ở trạng thái nào (còn param chưa quét)
+     * thì annotation cũ do extension đặt sẽ được xoá để không hiển thị sai.
+     *
+     * @return true nếu có thay đổi.
+     */
+    private boolean applyAnnotations(Annotations annotations, boolean[] state) {
+        boolean isScanned = state[0];
+        boolean isRejected = state[1];
+        boolean isBypassed = state[2];
+        boolean changed = false;
+
+        if (highlightEnabled) {
+            HighlightColor wanted = (isScanned || isBypassed) ? HighlightColor.YELLOW : HighlightColor.NONE;
+            HighlightColor current = annotations.highlightColor();
+            boolean writable = current == null || current == HighlightColor.NONE || current == HighlightColor.YELLOW;
+            if (writable && current != wanted) {
+                annotations.setHighlightColor(wanted);
+                changed = true;
+            }
+        }
+
+        if (noteEnabled) {
+            String wanted = isScanned ? "Scanned" : isBypassed ? "Bypassed" : isRejected ? "Rejected" : "";
+            String current = annotations.notes();
+            boolean writable = current == null || current.isBlank() || MANAGED_NOTES.contains(current);
+            if (writable && !wanted.equals(current == null ? "" : current)) {
+                annotations.setNotes(wanted);
+                changed = true;
+            }
+        }
+        return changed;
+    }
 
     /**
      * Cập nhật một dòng đã có hoặc chèn một dòng mới vào JTable.
@@ -403,6 +666,8 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                                  new Thread(() -> databaseManager.updateApiStatus(id, dbColumn, false)).start();
                              }
                         }
+                        // Trạng thái vừa đổi -> xếp API này vào hàng chờ annotate lại history.
+                        queueAnnotationUpdate((String) getValueAt(row, 0), (String) getValueAt(row, 1), (String) getValueAt(row, 2));
                     }
                 }
                 updateStats(); // Cập nhật các nhãn thống kê.
@@ -463,21 +728,19 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 outputPathField.setText(fileChooser.getSelectedFile().getAbsolutePath());
             }
         });
+        // Mọi checkbox chỉ có hiệu lực khi bấm Apply, giống các ô nhập văn bản.
         JCheckBox highlightCheckBox = new JCheckBox("Highlight Scanned/Bypassed requests in Proxy history", highlightEnabled);
-        highlightCheckBox.addActionListener(e -> {
-            highlightEnabled = highlightCheckBox.isSelected();
-            saveSettings();
-        });
         JCheckBox noteCheckBox = new JCheckBox("Add Note to Scanned/Bypassed requests in Proxy history", noteEnabled);
-        noteCheckBox.addActionListener(e -> {
-            noteEnabled = noteCheckBox.isSelected();
-            saveSettings();
-        });
         JCheckBox autoBypassCheckBox = new JCheckBox("Auto-bypass APIs without params", autoBypassNoParam);
-        autoBypassCheckBox.addActionListener(e -> {
-            autoBypassNoParam = autoBypassCheckBox.isSelected();
-            saveSettings();
-        });
+        JCheckBox autoAnnotateHistoryCheckBox = new JCheckBox(
+                "Auto-fix Highlight/Note in Proxy history when API status changes", autoAnnotateHistory);
+        autoAnnotateHistoryCheckBox.setToolTipText(
+                "Quét lại Proxy history mỗi " + ANNOTATION_SWEEP_INTERVAL_SECONDS
+                        + "s cho các API vừa đổi trạng thái, và quét toàn bộ khi bấm Apply.");
+        JTextField annotationBatchField = new JTextField(String.valueOf(annotationSweepMinBatch), 4);
+        annotationBatchField.setToolTipText(
+                "Hàng chờ ít hơn số này thì bỏ qua lượt quét (mỗi lượt phải duyệt toàn bộ history). Mặc định "
+                        + ANNOTATION_SWEEP_DEFAULT_MIN_BATCH + ", nhỏ nhất 1. Đọc lại khi bấm Apply.");
         JButton applyButton = new JButton("Apply");
         applyButton.addActionListener(e -> {
             exclude_extensions = extensionArea.getText().trim();
@@ -486,42 +749,67 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             path_parameter_rules = pathParameterRulesArea.getText().trim();
             ignore_path_parameter_rules = ignorePathParameterRulesArea.getText().trim();
             ignore_params = ignoreParamsArea.getText().trim();
+            annotationSweepMinBatch = parseSweepBatchSize(annotationBatchField.getText());
+            annotationBatchField.setText(String.valueOf(annotationSweepMinBatch)); // phản hồi giá trị thực dùng
             compiledPathParameterRules = compilePathParameterRules(path_parameter_rules);
             compiledIgnorePathParameterRules = compileIgnorePathParameterRules(ignore_path_parameter_rules);
             compiledIgnoreParamRules = compileIgnoreParamRules(ignore_params);
+            highlightEnabled = highlightCheckBox.isSelected();
+            noteEnabled = noteCheckBox.isSelected();
             autoBypassNoParam = autoBypassCheckBox.isSelected();
+            autoAnnotateHistory = autoAnnotateHistoryCheckBox.isSelected();
             saveSettings();
 
             // Khởi tạo lại CSDL trước để đảm bảo đang làm việc với đúng file
             databaseManager.close();
             databaseManager.initialize(savedOutputPath);
 
-            // *** Áp dụng bypass cho dữ liệu cũ ***
-            if (!compiledPathParameterRules.isEmpty() || !compiledIgnoreParamRules.isEmpty() || autoBypassNoParam) {
-                // Chạy trong một luồng riêng để không làm treo giao diện
-                new Thread(() -> {
-                    if (!compiledPathParameterRules.isEmpty()) {
-                        databaseManager.normalizeStoredPaths(this::normalizePath);
-                    }
-                    // Gỡ param bị ignore khỏi dữ liệu cũ TRƯỚC khi auto-bypass,
-                    // để API chỉ còn toàn param bị ignore cũng được bypass.
-                    if (!compiledIgnoreParamRules.isEmpty()) {
-                        databaseManager.purgeIgnoredParams(this::isIgnoredParam);
-                    }
-                    if (autoBypassNoParam) {
-                        databaseManager.applyAutoBypassToOldRecords();
-                    }
-                    // Tải lại dữ liệu trên luồng giao diện sau khi cập nhật xong
-                    SwingUtilities.invokeLater(this::loadDataFromDb);
-                }).start();
-            } else {
-                // Nếu không bật, chỉ cần tải lại dữ liệu như bình thường
-                loadDataFromDb();
-            }
+            // Nếu option sửa history đang bật -> hiện popup tiến trình, chỉ cho OK khi xong.
+            HistoryProgressDialog progressDialog = isHistoryAnnotationEnabled()
+                    ? new HistoryProgressDialog(SwingUtilities.getWindowAncestor(applyButton))
+                    : null;
 
-            JOptionPane.showMessageDialog(null, "Settings applied and project reloaded from database.");
+            // *** Áp dụng cho dữ liệu cũ - chạy trên luồng riêng để không làm treo giao diện ***
+            new Thread(() -> {
+                if (!compiledPathParameterRules.isEmpty()) {
+                    databaseManager.normalizeStoredPaths(this::normalizePath);
+                }
+                // Gỡ param bị ignore khỏi dữ liệu cũ TRƯỚC khi auto-bypass,
+                // để API chỉ còn toàn param bị ignore cũng được bypass.
+                if (!compiledIgnoreParamRules.isEmpty()) {
+                    databaseManager.purgeIgnoredParams(this::isIgnoredParam);
+                }
+                if (autoBypassNoParam) {
+                    databaseManager.applyAutoBypassToOldRecords();
+                }
+                // Tải lại dữ liệu trên luồng giao diện sau khi cập nhật xong
+                SwingUtilities.invokeLater(this::loadDataFromDb);
+
+                // Annotate lại TOÀN BỘ history theo trạng thái mới nhất.
+                if (progressDialog != null) {
+                    String result;
+                    try {
+                        pendingAnnotationKeys.clear(); // lượt quét toàn bộ đã bao trùm hàng chờ
+                        int annotated = runAnnotationSweep(null);
+                        result = annotated < 0
+                                ? "Không quét được history (một lượt quét khác đang chạy). Sẽ thử lại ở lượt định kỳ."
+                                : "Đã xử lý xong: " + annotated + " request trong Proxy history được cập nhật.";
+                    } catch (Throwable t) {
+                        result = "Xử lý history thất bại: " + t.getMessage();
+                    }
+                    final String message = result;
+                    SwingUtilities.invokeLater(() -> progressDialog.markDone(message));
+                }
+            }).start();
+
+            if (progressDialog != null) {
+                // Modal: chặn tại đây cho tới khi người dùng bấm OK (nút chỉ bật khi đã xử lý xong).
+                progressDialog.setVisible(true);
+            } else {
+                JOptionPane.showMessageDialog(null, "Settings applied and project reloaded from database.");
+            }
         });
-        tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightCheckBox, noteCheckBox, autoBypassCheckBox, applyButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl, excludeStatusCodesField, pathParameterRulesArea, ignorePathParameterRulesArea, ignoreParamsArea));
+        tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightCheckBox, noteCheckBox, autoBypassCheckBox, autoAnnotateHistoryCheckBox, annotationBatchField, applyButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl, excludeStatusCodesField, pathParameterRulesArea, ignorePathParameterRulesArea, ignoreParamsArea));
         
         // Đăng ký tab chính vào giao diện Burp.
         JPanel mainPanel = new JPanel(new BorderLayout());
@@ -913,6 +1201,8 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             props.remove("outputPath");
             props.setProperty(currentOutputPathKey(), valueOrEmpty(savedOutputPath));
             props.setProperty("autoBypassNoParam", String.valueOf(autoBypassNoParam));
+            props.setProperty("autoAnnotateHistory", String.valueOf(autoAnnotateHistory));
+            props.setProperty("annotationSweepMinBatch", String.valueOf(annotationSweepMinBatch));
             props.setProperty("exclude_status_code", valueOrEmpty(exclude_status_code));
             props.setProperty("path_parameter_rules", valueOrEmpty(path_parameter_rules));
             props.setProperty("ignore_path_parameter_rules", valueOrEmpty(ignore_path_parameter_rules));
@@ -958,6 +1248,8 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 noteEnabled = Boolean.parseBoolean(props.getProperty("noteEnabled", "false"));
                 savedOutputPath = props.getProperty(currentOutputPathKey(), "");
                 autoBypassNoParam = Boolean.parseBoolean(props.getProperty("autoBypassNoParam", "false"));
+                autoAnnotateHistory = Boolean.parseBoolean(props.getProperty("autoAnnotateHistory", "false"));
+                annotationSweepMinBatch = parseSweepBatchSize(props.getProperty("annotationSweepMinBatch"));
                 exclude_status_code = props.getProperty("exclude_status_code", "");
                 path_parameter_rules = props.getProperty("path_parameter_rules", "");
                 ignore_path_parameter_rules = props.getProperty("ignore_path_parameter_rules", "");
@@ -1025,10 +1317,13 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
     /**
      * Được gọi khi extension bị gỡ bỏ.
-     * Đóng kết nối cơ sở dữ liệu để giải phóng tài nguyên.
+     * Dừng bộ quét định kỳ và đóng kết nối cơ sở dữ liệu để giải phóng tài nguyên.
      */
     @Override
     public void extensionUnloaded() {
+        if (annotationSweeper != null) {
+            annotationSweeper.shutdownNow();
+        }
         databaseManager.close();
     }
 }

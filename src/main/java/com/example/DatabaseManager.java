@@ -163,8 +163,9 @@ public class DatabaseManager {
      * @param host          Host của request.
      * @param path          Path của request.
      * @param requestParams Tập hợp các tham số từ request hiện tại.
+     * @return true nếu có param mới được ghi nhận (trạng thái bị reset), ngược lại false.
      */
-    public synchronized void insertOrUpdateApi(String method, String host, String path, Set<String> requestParams) {
+    public synchronized boolean insertOrUpdateApi(String method, String host, String path, Set<String> requestParams) {
         String selectSql = "SELECT unscanned_params, scanned_params FROM api_log WHERE host = ? AND path = ? AND method = ?";
         try (PreparedStatement selectStmt = connection.prepareStatement(selectSql)) {
             selectStmt.setString(1, host);
@@ -196,7 +197,9 @@ public class DatabaseManager {
                         updateStmt.setString(4, method);
                         updateStmt.executeUpdate();
                     }
+                    return true;
                 }
+                return false;
             } else { // API mới -> Chèn dòng mới
                 String paramsStr = setToString(requestParams);
                 String insertSql = "INSERT INTO api_log (method, host, path, unscanned_params) VALUES (?, ?, ?, ?)";
@@ -207,10 +210,12 @@ public class DatabaseManager {
                     insertStmt.setString(4, paramsStr);
                     insertStmt.executeUpdate();
                 }
+                return true;
             }
         } catch (SQLException e) {
             api.logging().logToError("Error during insert/update API: " + e.getMessage(), e);
         }
+        return false;
     }
 
     /**
@@ -711,6 +716,38 @@ public class DatabaseManager {
      * @param path   Path của API.
      * @return Một mảng Object chứa 3 giá trị boolean, hoặc null nếu không tìm thấy.
      */
+    /**
+     * Tạo key định danh một API, dùng cho các Map trạng thái trong bộ nhớ.
+     * Ký tự phân tách là NUL nên không thể trùng với nội dung method/host/path.
+     */
+    static String stateKey(String method, String host, String path) {
+        return method + '\u0000' + host + '\u0000' + path;
+    }
+
+    /**
+     * Nạp trạng thái của toàn bộ API trong CSDL vào một Map bằng MỘT truy vấn duy nhất.
+     * <p>
+     * Dùng cho các tác vụ phải đối chiếu hàng chục nghìn bản ghi (ví dụ annotate lại
+     * proxy history): tra Map trong bộ nhớ thay vì gọi {@link #getApiStatus} cho từng item,
+     * tránh hàng chục nghìn round-trip JDBC trên cùng một connection với luồng ghi real-time.
+     *
+     * @return Map từ {@link #stateKey} sang mảng {is_scanned, is_rejected, is_bypassed}.
+     */
+    public synchronized Map<String, boolean[]> loadAllStates() {
+        Map<String, boolean[]> states = new HashMap<>();
+        String sql = "SELECT method, host, path, is_scanned, is_rejected, is_bypassed FROM api_log";
+        try (Statement stmt = connection.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) {
+                states.put(
+                        stateKey(rs.getString("method"), rs.getString("host"), rs.getString("path")),
+                        new boolean[]{rs.getBoolean("is_scanned"), rs.getBoolean("is_rejected"), rs.getBoolean("is_bypassed")});
+            }
+        } catch (SQLException e) {
+            api.logging().logToError("Failed to load API states: " + e.getMessage(), e);
+        }
+        return states;
+    }
+
     public Object[] getApiStatus(String method, String host, String path) {
         String sql = "SELECT is_scanned, is_rejected, is_bypassed FROM api_log WHERE host = ? AND path = ? AND method = ?";
         try (PreparedStatement stmt = connection.prepareStatement(sql)) {
