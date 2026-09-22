@@ -1307,13 +1307,13 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
         // Dựng lại request chứa đủ param (đã quét + chưa quét), lấy request gốc
         // và giá trị param từ chính Proxy history.
-        JMenuItem rebuildRequestItem = new JMenuItem("Rebuild request with all params (from history) -> Repeater");
+        JMenuItem rebuildRequestItem = new JMenuItem("Rebuild request with all params (from history) → Repeater");
         rebuildRequestItem.addActionListener(e -> startRebuild(table, false));
         popupMenu.add(rebuildRequestItem);
 
         // Bản thứ hai: thay cookie bằng giá trị mới nhất trong cookie jar, vì request
         // trong history có thể đã hết session.
-        JMenuItem rebuildWithCookiesItem = new JMenuItem("Rebuild request + refresh cookies from cookie jar -> Repeater");
+        JMenuItem rebuildWithCookiesItem = new JMenuItem("Rebuild request + refresh cookies from cookie jar → Repeater");
         rebuildWithCookiesItem.addActionListener(e -> startRebuild(table, true));
         popupMenu.add(rebuildWithCookiesItem);
 
