@@ -1441,8 +1441,12 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                     || !(row[2] instanceof String path) || !(row[3] instanceof Integer dbId)) {
                 continue;
             }
-            byKey.put(DatabaseManager.statusKey(method, host, path),
-                    new RebuildTarget(method, host, path, paramsById.getOrDefault(dbId, Set.of()), refreshCookies));
+            // Dòng ghi trước khi có rule vẫn lưu path thô: normalize lại để khớp key của history
+            // (path đã normalize thì normalize thêm lần nữa không đổi). Chiều ngược lại - dòng đã
+            // có {placeholder} mà rule hiện tại không tái tạo được - do findByPlaceholder xử lý.
+            String storedPath = normalizePath(path);
+            byKey.put(DatabaseManager.statusKey(method, host, storedPath),
+                    new RebuildTarget(method, host, storedPath, paramsById.getOrDefault(dbId, Set.of()), refreshCookies));
         }
         if (byKey.isEmpty()) {
             return "Không có dòng hợp lệ nào được chọn.";
@@ -1470,12 +1474,46 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             if (rawPath == null || rawPath.isEmpty()) {
                 continue;
             }
-            RebuildTarget target = byKey.get(DatabaseManager.statusKey(
-                    request.method(), request.httpService().host(), normalizePath(rawPath)));
+            String method = request.method();
+            String host = request.httpService().host();
+            RebuildTarget target = byKey.get(DatabaseManager.statusKey(method, host, normalizePath(rawPath)));
+            if (target == null) {
+                // Rule hiện tại có thể không cho ra đúng dạng đã lưu trong DB (rule đổi, hoặc
+                // rỗng): khớp path thô với path đã lưu, coi mỗi {placeholder} là một segment.
+                target = findByPlaceholder(byKey.values(), method, host, rawPath);
+            }
             if (target != null) {
                 target.observe(request);
             }
         }
+    }
+
+    private static RebuildTarget findByPlaceholder(Collection<RebuildTarget> targets, String method, String host, String rawPath) {
+        for (RebuildTarget target : targets) {
+            if (target.method.equals(method) && target.host.equals(host) && target.matchesRawPath(rawPath)) {
+                return target;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Biến một path đã normalize thành pattern khớp path thô: mỗi {placeholder} khớp đúng một
+     * segment, phần còn lại khớp nguyên văn. Trả về null nếu path không có placeholder nào.
+     */
+    static Pattern placeholderPattern(String normalizedPath) {
+        if (normalizedPath == null || normalizedPath.indexOf('{') < 0) {
+            return null;
+        }
+        Matcher matcher = Pattern.compile("\\{[^/{}]*\\}").matcher(normalizedPath);
+        StringBuilder regex = new StringBuilder("^");
+        int last = 0;
+        while (matcher.find()) {
+            regex.append(Pattern.quote(normalizedPath.substring(last, matcher.start()))).append("[^/]+");
+            last = matcher.end();
+        }
+        regex.append(Pattern.quote(normalizedPath.substring(last))).append("$");
+        return Pattern.compile(regex.toString());
     }
 
     /**
@@ -1493,28 +1531,35 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         }
         String method = current.method();
         String host = current.httpService().host();
-        String path = normalizePath(current.pathWithoutQuery());
-        String key = DatabaseManager.statusKey(method, host, path);
-        DatabaseManager.ApiStatus status = statusCache.get(key);
+        String rawPath = current.pathWithoutQuery();
+        String label = method + " " + host + rawPath;
 
-        if (status == null || status.knownParams.isEmpty()) {
-            showInfoDialog(method + " " + host + path
-                    + ":\nAPI này chưa có trong Recheck Scan, hoặc không có tham số nào được ghi nhận.");
+        Map.Entry<String, DatabaseManager.ApiStatus> match = findStatusForRawPath(method, host, rawPath);
+        if (match == null) {
+            showInfoDialog(label + ":\nAPI này chưa có trong Recheck Scan.");
+            return;
+        }
+        // Dùng đúng path đã lưu trong DB làm định danh, để history cũng khớp theo dạng đó.
+        final String path = match.getKey();
+        final Set<String> knownParams = match.getValue().knownParams;
+        if (knownParams.isEmpty()) {
+            showInfoDialog(label + ":\nAPI có trong Recheck Scan (" + path
+                    + ") nhưng không có tham số nào được ghi nhận - không có gì để điền.");
             return;
         }
 
         // Duyệt history trên luồng của sweeper để không bao giờ có hai lượt duyệt song song.
         runOnSweeperThread(() -> {
             try {
-                RebuildTarget target = new RebuildTarget(method, host, path, status.knownParams, refreshCookies);
-                observeHistory(Map.of(key, target));
+                RebuildTarget target = new RebuildTarget(method, host, path, knownParams, refreshCookies);
+                observeHistory(Map.of(DatabaseManager.statusKey(method, host, path), target));
 
                 FillReport report = new FillReport();
                 HttpRequest filled = target.fillMissingParams(current, report);
 
                 String summary = method + " " + host + path + ": thêm " + report.added + " param còn thiếu, "
                         + report.fromHistory + " lấy giá trị từ Proxy history"
-                        + " (" + status.knownParams.size() + " param đã biết)." + report.details();
+                        + " (" + knownParams.size() + " param đã biết)." + report.details();
                 api.logging().logToOutput(summary);
 
                 boolean nothingChanged = report.added == 0 && report.fromHistory == 0
@@ -1540,6 +1585,34 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         });
     }
 
+    /**
+     * Tìm trạng thái của API cho một path thô: thử key normalize theo rule hiện tại, rồi key
+     * thô, cuối cùng quét các path đã lưu có placeholder và khớp theo từng segment. Nhờ vậy
+     * request /api/users/123 vẫn tìm ra dòng /api/users/{id} kể cả khi rule đã đổi hoặc rỗng.
+     *
+     * @return Cặp (path đã lưu trong DB, trạng thái), hoặc null nếu không có.
+     */
+    private Map.Entry<String, DatabaseManager.ApiStatus> findStatusForRawPath(String method, String host, String rawPath) {
+        for (String candidate : new String[]{normalizePath(rawPath), rawPath}) {
+            DatabaseManager.ApiStatus status = statusCache.get(DatabaseManager.statusKey(method, host, candidate));
+            if (status != null) {
+                return Map.entry(candidate, status);
+            }
+        }
+        String prefix = method + '\u0000' + host + '\u0000';
+        for (Map.Entry<String, DatabaseManager.ApiStatus> entry : statusCache.entrySet()) {
+            if (!entry.getKey().startsWith(prefix)) {
+                continue;
+            }
+            String storedPath = entry.getKey().substring(prefix.length());
+            Pattern pattern = placeholderPattern(storedPath);
+            if (pattern != null && pattern.matcher(rawPath).matches()) {
+                return Map.entry(storedPath, entry.getValue());
+            }
+        }
+        return null;
+    }
+
     private void showInfoDialog(String message) {
         SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(
                 null, message, "Recheck Scan", JOptionPane.INFORMATION_MESSAGE));
@@ -1563,6 +1636,8 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         private int matchedItems = 0;
         /** Giá trị param đã quan sát được trong history, ưu tiên giá trị mới nhất khác rỗng. */
         private final Map<String, HttpParameter> observedParams = new HashMap<>();
+        /** Pattern khớp path thô theo placeholder, null nếu path không có placeholder. */
+        private final Pattern pathPattern;
 
         private RebuildTarget(String method, String host, String path, Set<String> wantedParams, boolean refreshCookies) {
             this.method = method;
@@ -1570,6 +1645,11 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             this.path = path;
             this.wantedParams = wantedParams == null ? Set.of() : wantedParams;
             this.refreshCookies = refreshCookies;
+            this.pathPattern = placeholderPattern(path);
+        }
+
+        private boolean matchesRawPath(String rawPath) {
+            return pathPattern != null && rawPath != null && pathPattern.matcher(rawPath).matches();
         }
 
         private void observe(HttpRequest request) {
@@ -1601,8 +1681,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         private String rebuildAndSend() {
             String label = method + " " + host + path;
             if (baseRequest == null) {
-                return label + ": KHÔNG tái tạo - không có request nào của API này trong Proxy history "
-                        + "(dựng mới sẽ phải bịa toàn bộ header/giá trị).";
+                return label + ": KHÔNG tái tạo - không có request nào trong Proxy history khớp "
+                        + path + (pathPattern == null ? "" : " (mỗi {..} = một segment)")
+                        + " (dựng mới sẽ phải bịa toàn bộ header/giá trị).";
             }
 
             FillReport report = new FillReport();
