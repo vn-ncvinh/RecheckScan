@@ -1489,26 +1489,22 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     }
 
     /**
-     * Chọn target cho một path thô theo hai tầng: trước hết chỉ nhận segment thoả regex của
-     * rule cùng tên placeholder (ví dụ {id}=number thì "123" khớp, "me" không); không có thì
-     * mới nới thành segment bất kỳ. Nhiều target cùng khớp thì lấy target cụ thể nhất.
+     * Chọn target cho một path thô: mỗi {placeholder} chỉ nhận segment thoả regex của rule
+     * cùng tên ({uuid}=uuid thì "Pentest1" không khớp - với rule đang nạp, path đó là một
+     * endpoint khác và được lưu thành dòng riêng). Placeholder không có rule cùng tên (rule đã
+     * xoá/đổi tên) thì nhận segment bất kỳ. Nhiều target cùng khớp thì lấy target cụ thể nhất.
      */
     private static RebuildTarget findByPlaceholder(Collection<RebuildTarget> targets, String method, String host, String rawPath) {
-        for (boolean strict : new boolean[]{true, false}) {
-            RebuildTarget best = null;
-            for (RebuildTarget target : targets) {
-                if (!target.method.equals(method) || !target.host.equals(host) || !target.matchesRawPath(rawPath, strict)) {
-                    continue;
-                }
-                if (best == null || moreSpecific(target.path, target.literalLength, best.path, best.literalLength)) {
-                    best = target;
-                }
+        RebuildTarget best = null;
+        for (RebuildTarget target : targets) {
+            if (!target.method.equals(method) || !target.host.equals(host) || !target.matchesRawPath(rawPath)) {
+                continue;
             }
-            if (best != null) {
-                return best;
+            if (best == null || moreSpecific(target.path, target.literalLength, best.path, best.literalLength)) {
+                best = target;
             }
         }
-        return null;
+        return best;
     }
 
     private static final Pattern PLACEHOLDER = Pattern.compile("\\{[^/{}]*\\}");
@@ -1653,31 +1649,23 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         }
         String prefix = method + '\u0000' + host + '\u0000';
         Map<String, String> segmentRegex = segmentRuleRegexByPlaceholder();
-        // Tầng 1: placeholder phải thoả rule cùng tên; tầng 2: segment bất kỳ.
-        // Cùng tầng có nhiều dòng khớp thì lấy dòng cụ thể nhất (phần literal dài nhất).
-        for (Map<String, String> regexByPlaceholder : List.of(segmentRegex, Map.<String, String>of())) {
-            Map.Entry<String, DatabaseManager.ApiStatus> best = null;
-            for (Map.Entry<String, DatabaseManager.ApiStatus> entry : statusCache.entrySet()) {
-                if (!entry.getKey().startsWith(prefix)) {
-                    continue;
-                }
-                String storedPath = entry.getKey().substring(prefix.length());
-                Pattern pattern = placeholderPattern(storedPath, regexByPlaceholder);
-                if (pattern == null || !pattern.matcher(rawPath).matches()) {
-                    continue;
-                }
-                if (best == null || moreSpecific(storedPath, literalLength(storedPath), best.getKey(), literalLength(best.getKey()))) {
-                    best = Map.entry(storedPath, entry.getValue());
-                }
+        // Placeholder phải thoả rule cùng tên (không có rule thì nhận segment bất kỳ).
+        // Nhiều dòng cùng khớp thì lấy dòng cụ thể nhất (phần literal dài nhất).
+        Map.Entry<String, DatabaseManager.ApiStatus> best = null;
+        for (Map.Entry<String, DatabaseManager.ApiStatus> entry : statusCache.entrySet()) {
+            if (!entry.getKey().startsWith(prefix)) {
+                continue;
             }
-            if (best != null) {
-                return best;
+            String storedPath = entry.getKey().substring(prefix.length());
+            Pattern pattern = placeholderPattern(storedPath, segmentRegex);
+            if (pattern == null || !pattern.matcher(rawPath).matches()) {
+                continue;
             }
-            if (regexByPlaceholder.isEmpty()) {
-                break; // tầng 2 đã chạy
+            if (best == null || moreSpecific(storedPath, literalLength(storedPath), best.getKey(), literalLength(best.getKey()))) {
+                best = Map.entry(storedPath, entry.getValue());
             }
         }
-        return null;
+        return best;
     }
 
     private void showInfoDialog(String message) {
@@ -1703,9 +1691,8 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         private int matchedItems = 0;
         /** Giá trị param đã quan sát được trong history, ưu tiên giá trị mới nhất khác rỗng. */
         private final Map<String, HttpParameter> observedParams = new HashMap<>();
-        /** Pattern khớp path thô theo placeholder (null nếu không có placeholder): thoả rule / bất kỳ. */
-        private final Pattern strictPathPattern;
-        private final Pattern loosePathPattern;
+        /** Pattern khớp path thô theo placeholder, null nếu path không có placeholder. */
+        private final Pattern pathPattern;
         private final int literalLength;
 
         private RebuildTarget(String method, String host, String path, Set<String> wantedParams, boolean refreshCookies) {
@@ -1714,14 +1701,12 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             this.path = path;
             this.wantedParams = wantedParams == null ? Set.of() : wantedParams;
             this.refreshCookies = refreshCookies;
-            this.strictPathPattern = placeholderPattern(path, segmentRuleRegexByPlaceholder());
-            this.loosePathPattern = placeholderPattern(path, Map.of());
+            this.pathPattern = placeholderPattern(path, segmentRuleRegexByPlaceholder());
             this.literalLength = literalLength(path);
         }
 
-        private boolean matchesRawPath(String rawPath, boolean strict) {
-            Pattern pattern = strict ? strictPathPattern : loosePathPattern;
-            return pattern != null && rawPath != null && pattern.matcher(rawPath).matches();
+        private boolean matchesRawPath(String rawPath) {
+            return pathPattern != null && rawPath != null && pathPattern.matcher(rawPath).matches();
         }
 
         private void observe(HttpRequest request) {
@@ -1754,7 +1739,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             String label = method + " " + host + path;
             if (baseRequest == null) {
                 return label + ": KHÔNG tái tạo - không có request nào trong Proxy history khớp "
-                        + path + (loosePathPattern == null ? "" : " (mỗi {..} = một segment)")
+                        + path + (pathPattern == null ? "" : " (mỗi {..} = một segment thoả rule cùng tên)")
                         + " (dựng mới sẽ phải bịa toàn bộ header/giá trị).";
             }
 
