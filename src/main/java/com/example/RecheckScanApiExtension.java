@@ -5,6 +5,7 @@ import burp.api.montoya.core.Annotations;
 import burp.api.montoya.core.HighlightColor;
 import burp.api.montoya.core.ToolType;
 import burp.api.montoya.http.message.ContentType;
+import burp.api.montoya.http.message.Cookie;
 import burp.api.montoya.extension.ExtensionUnloadingHandler;
 import burp.api.montoya.http.handler.*;
 import burp.api.montoya.http.message.params.*;
@@ -19,6 +20,7 @@ import java.awt.*;
 import java.awt.datatransfer.StringSelection;
 import java.awt.event.ActionEvent;
 import java.io.StringReader;
+import java.time.ZonedDateTime;
 import java.io.StringWriter;
 import java.util.*;
 import java.util.List;
@@ -298,6 +300,357 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         return allParamNames;
     }
 
+
+    /**
+     * Lấy dữ liệu các dòng đang chọn trên EDT rồi dựng request ở luồng nền.
+     *
+     * @param refreshCookies true để thay cookie bằng giá trị mới nhất trong cookie jar.
+     */
+    private void startRebuild(JTable table, boolean refreshCookies) {
+        int[] selectedRows = table.getSelectedRows();
+        if (selectedRows.length == 0) {
+            return;
+        }
+        List<Object[]> targets = new ArrayList<>();
+        for (int viewRow : selectedRows) {
+            int modelRow = table.convertRowIndexToModel(viewRow);
+            targets.add(new Object[]{
+                    tableModel.getValueAt(modelRow, 0),
+                    tableModel.getValueAt(modelRow, 1),
+                    tableModel.getValueAt(modelRow, 2),
+                    tableModel.getValueAt(modelRow, 8)});
+        }
+        new Thread(() -> {
+            String report;
+            try {
+                report = rebuildRequestsFromHistory(targets, refreshCookies);
+            } catch (Throwable t) {
+                report = "Rebuild thất bại: " + t.getMessage();
+                api.logging().logToError("Failed to rebuild request from history: " + t.getMessage());
+            }
+            final String message = report;
+            api.logging().logToOutput(message);
+            SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(
+                    null, message, "Rebuild request from history", JOptionPane.INFORMATION_MESSAGE));
+        }).start();
+    }
+
+    /**
+     * Dựng lại request cho các API được chọn, chứa đầy đủ param đã quét + chưa quét.
+     * <p>
+     * Toàn bộ dữ liệu đều lấy từ Proxy history thật: request gốc là một request đã đi qua
+     * Burp, giá trị param cũng là giá trị đã quan sát được. Param chưa từng thấy trong
+     * history được thêm với giá trị RỖNG - extension không tự sinh giá trị.
+     * Duyệt history một lượt duy nhất cho tất cả API được chọn.
+     *
+     * @param targets Mỗi phần tử là {method, host, path, dbId} của một dòng trên bảng.
+     * @param refreshCookies true để lấy cookie mới nhất từ cookie jar thay cho cookie trong history.
+     * @return Báo cáo để hiển thị cho người dùng.
+     */
+    private String rebuildRequestsFromHistory(List<Object[]> targets, boolean refreshCookies) {
+        Map<String, RebuildTarget> byKey = new LinkedHashMap<>();
+        for (Object[] row : targets) {
+            if (!(row[0] instanceof String method) || !(row[1] instanceof String host)
+                    || !(row[2] instanceof String path) || !(row[3] instanceof Integer dbId)) {
+                continue;
+            }
+            byKey.put(DatabaseManager.stateKey(method, host, path),
+                    new RebuildTarget(method, host, path, databaseManager.getAllParamsById(dbId), refreshCookies));
+        }
+        if (byKey.isEmpty()) {
+            return "Không có dòng hợp lệ nào được chọn.";
+        }
+
+        // Một lượt duyệt history cho tất cả API được chọn.
+        for (ProxyHttpRequestResponse item : api.proxy().history()) {
+            HttpRequest request = item.request();
+            if (request == null) {
+                continue;
+            }
+            String rawPath = request.pathWithoutQuery();
+            if (rawPath == null || rawPath.isEmpty()) {
+                continue;
+            }
+            RebuildTarget target = byKey.get(DatabaseManager.stateKey(
+                    request.method(), request.httpService().host(), normalizePath(rawPath)));
+            if (target != null) {
+                target.observe(request);
+            }
+        }
+
+        StringBuilder report = new StringBuilder();
+        for (RebuildTarget target : byKey.values()) {
+            report.append(target.rebuildAndSend()).append('\n');
+        }
+        return report.toString().trim();
+    }
+
+    /**
+     * Thu thập dữ liệu thật từ history cho một API rồi dựng request gửi sang Repeater.
+     */
+    private class RebuildTarget {
+        private final String method;
+        private final String host;
+        private final String path;
+        private final Set<String> wantedParams;
+        private final boolean refreshCookies;
+
+        /** Request gốc: chọn request khớp có nhiều param nhất (bằng nhau thì lấy bản mới nhất). */
+        private HttpRequest baseRequest;
+        private int baseParamCount = -1;
+        private int matchedItems = 0;
+        /** Giá trị param đã quan sát được trong history, ưu tiên giá trị mới nhất khác rỗng. */
+        private final Map<String, HttpParameter> observedParams = new HashMap<>();
+
+        private RebuildTarget(String method, String host, String path, Set<String> wantedParams, boolean refreshCookies) {
+            this.method = method;
+            this.host = host;
+            this.path = path;
+            this.wantedParams = wantedParams == null ? Set.of() : wantedParams;
+            this.refreshCookies = refreshCookies;
+        }
+
+        private void observe(HttpRequest request) {
+            matchedItems++;
+            List<ParsedHttpParameter> params = request.parameters();
+            int paramCount = params == null ? 0 : params.size();
+            if (paramCount >= baseParamCount) {
+                baseParamCount = paramCount;
+                baseRequest = request;
+            }
+            if (params == null) {
+                return;
+            }
+            for (ParsedHttpParameter param : params) {
+                if (param.name() == null) {
+                    continue;
+                }
+                HttpParameter known = observedParams.get(param.name());
+                // Đã có giá trị thật thì không để giá trị rỗng ghi đè.
+                if (known != null && !isBlank(known.value()) && isBlank(param.value())) {
+                    continue;
+                }
+                observedParams.put(param.name(), HttpParameter.parameter(
+                        param.name(), param.value() == null ? "" : param.value(), param.type()));
+            }
+        }
+
+        private String rebuildAndSend() {
+            String label = method + " " + host + path;
+            if (baseRequest == null) {
+                return label + ": KHÔNG tái tạo - không có request nào của API này trong Proxy history "
+                        + "(dựng mới sẽ phải bịa toàn bộ header/giá trị).";
+            }
+
+            Map<String, String> baseValues = new HashMap<>();
+            for (ParsedHttpParameter param : baseRequest.parameters()) {
+                baseValues.put(param.name(), param.value());
+            }
+
+            List<HttpParameter> toAdd = new ArrayList<>();
+            List<HttpParameter> toUpdate = new ArrayList<>();
+            List<String> emptyParams = new ArrayList<>();
+            int fromHistory = 0;
+            HttpParameterType fallbackType = inferFallbackType();
+
+            for (String name : new TreeSet<>(wantedParams)) {
+                HttpParameter observed = observedParams.get(name);
+                if (baseValues.containsKey(name)) {
+                    // Có sẵn trong request gốc: chỉ bù giá trị nếu đang rỗng mà nơi khác có giá trị thật.
+                    if (observed != null && !isBlank(observed.value()) && isBlank(baseValues.get(name))) {
+                        toUpdate.add(observed);
+                        fromHistory++;
+                    }
+                    continue;
+                }
+                if (observed != null) {
+                    toAdd.add(observed);
+                    fromHistory++;
+                    continue;
+                }
+                // Không có trong history -> thêm với giá trị rỗng, tuyệt đối không tự sinh giá trị.
+                emptyParams.add(name);
+                toAdd.add(HttpParameter.parameter(name, "", fallbackType));
+            }
+
+            HttpRequest rebuilt = baseRequest;
+            List<String> failedParams = new ArrayList<>();
+            for (HttpParameter param : toAdd) {
+                try {
+                    rebuilt = rebuilt.withAddedParameters(param);
+                } catch (RuntimeException e) {
+                    failedParams.add(param.name() + " (" + param.type() + ")");
+                }
+            }
+            for (HttpParameter param : toUpdate) {
+                try {
+                    rebuilt = rebuilt.withUpdatedParameters(param);
+                } catch (RuntimeException e) {
+                    failedParams.add(param.name() + " (" + param.type() + ")");
+                }
+            }
+
+            List<String> cookieChanges = new ArrayList<>();
+            if (refreshCookies) {
+                rebuilt = applyCookieJar(rebuilt, cookieChanges, failedParams);
+            }
+
+            api.repeater().sendToRepeater(rebuilt, repeaterTabName());
+
+            StringBuilder summary = new StringBuilder(label);
+            summary.append(": đã gửi sang Repeater - ").append(wantedParams.size()).append(" param trong CSDL, ")
+                    .append(baseParamCount).append(" có sẵn trong request gốc, ")
+                    .append(fromHistory).append(" lấy giá trị từ request khác trong history")
+                    .append(" (").append(matchedItems).append(" request khớp).");
+            if (!emptyParams.isEmpty()) {
+                summary.append("\n  - ").append(emptyParams.size())
+                        .append(" param không có trong history nên để giá trị RỖNG (type ")
+                        .append(fallbackType).append(" suy từ request gốc): ")
+                        .append(String.join(", ", emptyParams));
+            }
+            if (!cookieChanges.isEmpty()) {
+                summary.append("\n  - Cookie jar: ").append(cookieChanges.size()).append(" cookie được làm mới: ")
+                        .append(String.join(", ", cookieChanges));
+            } else if (refreshCookies) {
+                summary.append("\n  - Cookie jar: không có cookie nào khớp domain/path (hoặc đã trùng giá trị).");
+            }
+            if (!failedParams.isEmpty()) {
+                summary.append("\n  - Burp không chèn được: ").append(String.join(", ", failedParams));
+            }
+            return summary.toString();
+        }
+
+        /**
+         * Thay cookie của request bằng giá trị mới nhất trong cookie jar của Burp.
+         * <p>
+         * Giá trị vẫn là giá trị thật Burp quan sát được từ `Set-Cookie`, chỉ mới hơn cookie
+         * trong history. Chỉ nhận cookie khớp domain + path của request gốc và chưa hết hạn.
+         * Giá trị cũ được ghi vào báo cáo để có thể tự trả lại trong Repeater.
+         */
+        private HttpRequest applyCookieJar(HttpRequest request, List<String> changes, List<String> failed) {
+            Map<String, String> currentCookies = new HashMap<>();
+            for (ParsedHttpParameter param : request.parameters()) {
+                if (param.type() == HttpParameterType.COOKIE) {
+                    currentCookies.put(param.name(), param.value());
+                }
+            }
+
+            // Cookie path phải so với path THẬT của request gốc, không phải path đã normalize.
+            String realPath = baseRequest.pathWithoutQuery();
+            HttpRequest result = request;
+            for (Cookie cookie : matchingCookies(host, realPath)) {
+                String currentValue = currentCookies.get(cookie.name());
+                String newValue = cookie.value() == null ? "" : cookie.value();
+                if (currentCookies.containsKey(cookie.name()) && Objects.equals(currentValue, newValue)) {
+                    continue; // đã đúng giá trị mới nhất
+                }
+                HttpParameter replacement = HttpParameter.cookieParameter(cookie.name(), newValue);
+                try {
+                    result = currentCookies.containsKey(cookie.name())
+                            ? result.withUpdatedParameters(replacement)
+                            : result.withAddedParameters(replacement);
+                } catch (RuntimeException e) {
+                    failed.add(cookie.name() + " (COOKIE)");
+                    continue;
+                }
+                changes.add(currentCookies.containsKey(cookie.name())
+                        ? cookie.name() + " (cũ: " + shorten(currentValue) + ")"
+                        : cookie.name() + " (mới)");
+            }
+            return result;
+        }
+
+        /**
+         * Suy ra type cho param chưa từng thấy, dựa trên chính request gốc
+         * (suy ra type, không suy ra giá trị). Mặc định là URL.
+         */
+        private HttpParameterType inferFallbackType() {
+            Map<HttpParameterType, Integer> counts = new EnumMap<>(HttpParameterType.class);
+            for (ParsedHttpParameter param : baseRequest.parameters()) {
+                if (param.type() == HttpParameterType.COOKIE) {
+                    continue; // cookie không phải param của API
+                }
+                counts.merge(param.type(), 1, Integer::sum);
+            }
+            return counts.entrySet().stream()
+                    .max(Map.Entry.comparingByValue())
+                    .map(Map.Entry::getKey)
+                    .orElse(HttpParameterType.URL);
+        }
+
+        private String repeaterTabName() {
+            String name = method + " " + path;
+            return name.length() <= 40 ? name : name.substring(0, 40);
+        }
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
+    }
+
+    /**
+     * Cookie trong jar khớp với host + path của request và chưa hết hạn.
+     * CookieJar không có API "lấy cookie cho URL này" nên phải tự khớp,
+     * nếu không sẽ gửi cookie của site khác sang API này.
+     */
+    private List<Cookie> matchingCookies(String host, String requestPath) {
+        List<Cookie> matched = new ArrayList<>();
+        if (host == null) {
+            return matched;
+        }
+        ZonedDateTime now = ZonedDateTime.now();
+        for (Cookie cookie : api.http().cookieJar().cookies()) {
+            if (cookie.name() == null || !cookieDomainMatches(host, cookie.domain())) {
+                continue;
+            }
+            if (!cookiePathMatches(requestPath, cookie.path())) {
+                continue;
+            }
+            // expiration() rỗng = session cookie (không hết hạn), không được coi là đã hết hạn.
+            if (cookie.expiration().isPresent() && cookie.expiration().get().isBefore(now)) {
+                continue;
+            }
+            matched.add(cookie);
+        }
+        return matched;
+    }
+
+    /** Khớp host với domain của cookie, hỗ trợ cả dạng ".example.com" cho subdomain. */
+    static boolean cookieDomainMatches(String host, String cookieDomain) {
+        if (host == null || cookieDomain == null) {
+            return false;
+        }
+        String normalizedHost = host.toLowerCase(Locale.ROOT);
+        String domain = cookieDomain.toLowerCase(Locale.ROOT);
+        if (domain.startsWith(".")) {
+            domain = domain.substring(1);
+        }
+        if (domain.isEmpty()) {
+            return false;
+        }
+        return normalizedHost.equals(domain) || normalizedHost.endsWith("." + domain);
+    }
+
+    /** Khớp path theo RFC 6265: bằng nhau, cookie path kết thúc bằng "/", hoặc biên là "/". */
+    static boolean cookiePathMatches(String requestPath, String cookiePath) {
+        if (cookiePath == null || cookiePath.isEmpty() || cookiePath.equals("/")) {
+            return true;
+        }
+        if (requestPath == null || !requestPath.startsWith(cookiePath)) {
+            return false;
+        }
+        return requestPath.length() == cookiePath.length()
+                || cookiePath.endsWith("/")
+                || requestPath.charAt(cookiePath.length()) == '/';
+    }
+
+    /** Rút ngắn giá trị cookie khi đưa vào báo cáo. */
+    private static String shorten(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.length() <= 12 ? value : value.substring(0, 12) + "...";
+    }
 
     /**
      * Popup tiến trình cho lần quét history khi bấm Apply.
@@ -1124,6 +1477,19 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             }
         });
         contextMenu.add(copyApiListItem);
+
+        // MenuItem "Rebuild request": dựng lại request chứa đủ param (đã quét + chưa quét),
+        // lấy request gốc và giá trị param từ chính Proxy history.
+        JMenuItem rebuildRequestItem = new JMenuItem("Rebuild request with all params (from history) -> Repeater");
+        rebuildRequestItem.addActionListener(e -> startRebuild(table, false));
+        contextMenu.add(rebuildRequestItem);
+
+        // Bản thứ hai: thay cookie của request gốc bằng cookie mới nhất trong cookie jar của Burp,
+        // vì request trong history có thể đã hết session.
+        JMenuItem rebuildWithCookiesItem = new JMenuItem(
+                "Rebuild request + refresh cookies from cookie jar -> Repeater");
+        rebuildWithCookiesItem.addActionListener(e -> startRebuild(table, true));
+        contextMenu.add(rebuildWithCookiesItem);
 
         // Đăng ký mouse listener cho right-click
         table.addMouseListener(new java.awt.event.MouseAdapter() {
