@@ -121,6 +121,74 @@ public class DatabaseManager {
             """;
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(sql);
+            // Cấu hình đi theo file DB (không theo project Burp) để nhiều project dùng chung.
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                """);
+        }
+    }
+
+    /** Đường dẫn file DB đang mở (đã chuẩn hoá), null nếu chưa mở. */
+    public synchronized String currentDbPath() {
+        return dbPath;
+    }
+
+    /** Chuẩn hoá một đường dẫn người dùng nhập giống hệt cách {@link #initialize} sẽ mở nó. */
+    public String resolveDbPath(String savedOutputPath) {
+        return getDbPath(savedOutputPath);
+    }
+
+    /**
+     * Đọc toàn bộ cấu hình lưu trong file DB.
+     *
+     * @return Map key -> value; rỗng nếu DB chưa có cấu hình (file mới, hoặc tạo bởi bản cũ).
+     */
+    public synchronized Map<String, String> loadSettings() {
+        Map<String, String> settings = new LinkedHashMap<>();
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT key, value FROM settings ORDER BY key")) {
+            while (rs.next()) {
+                settings.put(rs.getString("key"), rs.getString("value"));
+            }
+        } catch (SQLException e) {
+            api.logging().logToError("Failed to load settings from database: " + e.getMessage(), e);
+        }
+        return settings;
+    }
+
+    /** Ghi cấu hình vào file DB trong một transaction; key cũ không có trong map được giữ nguyên. */
+    public synchronized void saveSettings(Map<String, String> settings) {
+        String sql = "INSERT INTO settings (key, value) VALUES (?, ?) "
+                + "ON CONFLICT(key) DO UPDATE SET value = excluded.value";
+        boolean originalAutoCommit = true;
+        try {
+            originalAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+                for (Map.Entry<String, String> entry : settings.entrySet()) {
+                    stmt.setString(1, entry.getKey());
+                    stmt.setString(2, entry.getValue() == null ? "" : entry.getValue());
+                    stmt.addBatch();
+                }
+                stmt.executeBatch();
+            }
+            connection.commit();
+        } catch (SQLException e) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackError) {
+                api.logging().logToError("Failed to rollback settings save: " + rollbackError.getMessage(), rollbackError);
+            }
+            api.logging().logToError("Failed to save settings to database: " + e.getMessage(), e);
+        } finally {
+            try {
+                connection.setAutoCommit(originalAutoCommit);
+            } catch (SQLException e) {
+                api.logging().logToError("Failed to restore database autocommit: " + e.getMessage(), e);
+            }
         }
     }
 
