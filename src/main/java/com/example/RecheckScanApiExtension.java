@@ -298,7 +298,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
                     // Nhánh 2a: Tự động bypass cho API không có tham số.
                     if (requestParams.isEmpty() && autoBypassNoParam) {
-                        submitDbTask(() -> databaseManager.autoBypassApi(method, host, path));
+                        if (needsAutoBypassWrite(method, host, path)) {
+                            submitDbTask(() -> databaseManager.autoBypassApi(method, host, path));
+                        }
                          // Thêm highlight/note ngay lập tức cho request này.
                          if (highlightEnabled) response.annotations().setHighlightColor(HighlightColor.YELLOW);
                          if (noteEnabled) response.annotations().setNotes("Bypassed");
@@ -307,7 +309,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                         // Annotation được suy ra từ cache trạng thái, cho ra đúng kết quả mà
                         // insertOrUpdateApi sẽ để lại, nhưng không phải chạy SQL trên luồng HTTP.
                         applyAnnotations(response, method, host, path, requestParams);
-                        submitDbTask(() -> databaseManager.insertOrUpdateApi(method, host, path, requestParams));
+                        if (hasUnknownParams(method, host, path, requestParams)) {
+                            submitDbTask(() -> databaseManager.insertOrUpdateApi(method, host, path, requestParams));
+                        }
                     }
                 }
 
@@ -354,6 +358,26 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     }
 
     /**
+     * Request có cần ghi xuống CSDL không: chỉ khi API chưa có trong cache hoặc mang param mới.
+     * Request lặp lại của API đã biết đủ param thì bỏ qua ngay trên luồng HTTP, không tốn
+     * câu SQL nào. Cache được cập nhật trên luồng CSDL sau mỗi lần ghi nên luôn theo kịp.
+     */
+    boolean hasUnknownParams(String method, String host, String path, Set<String> requestParams) {
+        DatabaseManager.ApiStatus status = statusCache.get(DatabaseManager.statusKey(method, host, path));
+        return status == null || !status.knownParams.containsAll(requestParams);
+    }
+
+    /**
+     * Auto-bypass chỉ cần ghi khi API chưa có, hoặc chưa mang cờ nào. Đã bypass/scan/reject thì
+     * câu upsert không đổi gì, nên bỏ qua. Trường hợp còn lại (API có cờ tắt nhưng từng có param)
+     * vẫn gửi xuống, CSDL tự quyết định và không ghi nếu không cần.
+     */
+    boolean needsAutoBypassWrite(String method, String host, String path) {
+        DatabaseManager.ApiStatus status = statusCache.get(DatabaseManager.statusKey(method, host, path));
+        return status == null || !(status.bypassed || status.scanned || status.rejected);
+    }
+
+    /**
      * Đẩy một thao tác ghi CSDL sang luồng nền, rồi đồng bộ kết quả lên cache và giao diện.
      * Chỉ dòng thực sự thay đổi được cập nhật, thay cho việc tải lại toàn bộ bảng.
      *
@@ -387,8 +411,22 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     private void cacheStatus(DatabaseManager.ApiUpdate update) {
         Object[] row = update.row;
         String key = DatabaseManager.statusKey((String) row[0], (String) row[1], (String) row[2]);
-        statusCache.put(key, update.status);
-        queueAnnotationUpdate(key);
+        DatabaseManager.ApiStatus previous = statusCache.put(key, update.status);
+        if (flagsChanged(previous, update.status)) {
+            queueAnnotationUpdate(key);
+        }
+    }
+
+    /**
+     * Annotation trong history chỉ phụ thuộc 3 cờ scanned/rejected/bypassed, nên chỉ khi một
+     * trong ba cờ thực sự đổi mới cần sửa lại history. Request lặp lại của API đã biết (ví dụ
+     * bypass -> bypass) không được xếp hàng. API chưa có trong cache coi như mọi cờ đều tắt.
+     */
+    static boolean flagsChanged(DatabaseManager.ApiStatus previous, DatabaseManager.ApiStatus current) {
+        boolean wasScanned = previous != null && previous.scanned;
+        boolean wasRejected = previous != null && previous.rejected;
+        boolean wasBypassed = previous != null && previous.bypassed;
+        return wasScanned != current.scanned || wasRejected != current.rejected || wasBypassed != current.bypassed;
     }
 
     /**
@@ -402,12 +440,15 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 (String) tableModel.getValueAt(modelRow, 1),
                 (String) tableModel.getValueAt(modelRow, 2));
         DatabaseManager.ApiStatus previous = statusCache.get(key);
-        statusCache.put(key, new DatabaseManager.ApiStatus(
+        DatabaseManager.ApiStatus current = new DatabaseManager.ApiStatus(
                 Boolean.TRUE.equals(tableModel.getValueAt(modelRow, 4)),
                 Boolean.TRUE.equals(tableModel.getValueAt(modelRow, 5)),
                 Boolean.TRUE.equals(tableModel.getValueAt(modelRow, 6)),
-                previous == null ? Set.of() : previous.knownParams));
-        queueAnnotationUpdate(key);
+                previous == null ? Set.of() : previous.knownParams);
+        statusCache.put(key, current);
+        if (flagsChanged(previous, current)) {
+            queueAnnotationUpdate(key);
+        }
     }
 
     /**
