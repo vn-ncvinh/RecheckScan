@@ -1028,7 +1028,11 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         settingsForm = new SettingsForm(extensionArea, outputPathField, excludeStatusCodesField, pathParameterRulesArea,
                 ignoredParameterRulesArea, annotationBatchField, highlightCheckBox, noteCheckBox, autoBypassCheckBox,
                 autoAnnotateHistoryCheckBox);
-        tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightCheckBox, noteCheckBox, autoBypassCheckBox, autoAnnotateHistoryCheckBox, annotationBatchField, applyButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl, excludeStatusCodesField, pathParameterRulesArea, ignoredParameterRulesArea));
+        JButton resetDefaultButton = new JButton("Reset Default");
+        resetDefaultButton.setToolTipText("Đưa mọi cấu hình về mặc định và lưu vào file DB đang mở. "
+                + "Không đổi đường dẫn DB, không đụng dữ liệu API.");
+        resetDefaultButton.addActionListener(e -> resetSettingsToDefault());
+        tabs.addTab("Settings", SettingsPanel.create(extensionArea, outputPathField, browseButton, highlightCheckBox, noteCheckBox, autoBypassCheckBox, autoAnnotateHistoryCheckBox, annotationBatchField, applyButton, resetDefaultButton, totalLbl, scannedLbl, rejectedLbl, bypassLbl, unverifiedLbl, excludeStatusCodesField, pathParameterRulesArea, ignoredParameterRulesArea));
         
         // Đăng ký tab chính vào giao diện Burp.
         JPanel mainPanel = new JPanel(new BorderLayout());
@@ -2285,6 +2289,27 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
             api.logging().logToError("Failed to read settings from the Burp project: " + e.getMessage());
         }
         return props;
+    }
+
+    /**
+     * Đưa cấu hình về mặc định: hỏi xác nhận, nạp mặc định vào bộ nhớ, lưu vào file DB đang mở
+     * và hiện lên form. Đường dẫn DB và dữ liệu API giữ nguyên. Gọi từ EDT.
+     */
+    private void resetSettingsToDefault() {
+        int answer = JOptionPane.showConfirmDialog(null,
+                "Đưa toàn bộ cấu hình về mặc định và lưu vào file DB đang mở?\n"
+                        + "Đường dẫn DB và dữ liệu API không bị ảnh hưởng.",
+                "Reset Default", JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (answer != JOptionPane.OK_OPTION) {
+            return;
+        }
+        // Map rỗng -> mọi key vắng mặt -> applySettings() dùng giá trị mặc định.
+        applySettings(Map.of());
+        pendingAnnotationKeys.clear();
+        if (settingsForm != null) {
+            settingsForm.showCurrentValues();
+        }
+        runOnDbThread(this::persistSettingsNow);
     }
 
     /** Ghi duy nhất đường dẫn DB vào Burp; các key cấu hình cũ (nếu còn) được dọn đi. */
