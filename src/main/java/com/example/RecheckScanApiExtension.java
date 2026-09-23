@@ -907,9 +907,9 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
         tabs.addTab("Logs", logsPanel);
 
         // --- Cài đặt Tab "Settings" ---
-        JTextArea extensionArea = new JTextArea(exclude_extensions != null ? exclude_extensions : ".js,.svg,.css,.png,.jpg,.ttf,.ico,.html,.map,.gif,.woff2,.bcmap,.jpeg,.woff");
+        JTextArea extensionArea = new JTextArea(exclude_extensions != null ? exclude_extensions : DEFAULT_EXCLUDE_EXTENSIONS);
         JTextField outputPathField = new JTextField(savedOutputPath != null ? savedOutputPath : "");
-        JTextField excludeStatusCodesField = new JTextField(exclude_status_code != null ? exclude_status_code : "404,405");
+        JTextField excludeStatusCodesField = new JTextField(exclude_status_code != null ? exclude_status_code : DEFAULT_EXCLUDE_STATUS_CODES);
         JTextArea pathParameterRulesArea = new JTextArea(path_parameter_rules != null ? path_parameter_rules : "");
         JTextArea ignoredParameterRulesArea = new JTextArea(ignored_parameter_rules != null ? ignored_parameter_rules : "");
         JButton browseButton = new JButton("Browse");
@@ -2169,6 +2169,11 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     /**
      * Lưu các cài đặt hiện tại vào persistence extension data (đi theo project).
      */
+    /** Mặc định khi cả Burp lẫn DB đều chưa có giá trị. */
+    static final String DEFAULT_EXCLUDE_EXTENSIONS =
+            ".js,.svg,.css,.png,.jpg,.ttf,.ico,.html,.map,.gif,.woff2,.bcmap,.jpeg,.woff";
+    static final String DEFAULT_EXCLUDE_STATUS_CODES = "404,405";
+
     /** Các key cấu hình lưu trong DB (Burp chỉ giữ đường dẫn DB). */
     private static final List<String> DB_SETTING_KEYS = List.of(
             "exclude_extensions", "exclude_status_code", "path_parameter_rules", "ignored_parameter_rules",
@@ -2202,8 +2207,8 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
 
     /** Nạp map key -> value (từ DB hoặc từ Burp cũ) vào bộ nhớ và biên dịch lại rule. */
     private void applySettings(Map<String, String> settings) {
-        exclude_extensions = settings.getOrDefault("exclude_extensions", "");
-        exclude_status_code = settings.getOrDefault("exclude_status_code", "");
+        exclude_extensions = settings.getOrDefault("exclude_extensions", DEFAULT_EXCLUDE_EXTENSIONS);
+        exclude_status_code = settings.getOrDefault("exclude_status_code", DEFAULT_EXCLUDE_STATUS_CODES);
         path_parameter_rules = settings.getOrDefault("path_parameter_rules", "");
         ignored_parameter_rules = settings.getOrDefault("ignored_parameter_rules", "");
         highlightEnabled = Boolean.parseBoolean(settings.getOrDefault("highlightEnabled", "false"));
@@ -2222,23 +2227,64 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
      * đây là bước chuyển một lần cho người dùng cũ, không mất cấu hình đang có.
      */
     private void loadSettingsFromDatabase(Properties legacyBurpSettings) {
+        loadOrSeedSettings(legacyBurpSettings);
+    }
+
+    /** Nguồn cấu hình đã nạp sau {@link #loadOrSeedSettings}. */
+    enum SettingsSource { DATABASE, BURP_LEGACY, DEFAULTS }
+
+    /**
+     * Luồng nạp cấu hình dùng chung cho lúc khởi động và lúc đổi file DB:
+     * 1. DB có cấu hình -> dùng DB.
+     * 2. DB trống, project Burp còn key cũ (nâng cấp từ bản lưu mọi thứ trong Burp) -> lấy từ Burp.
+     * 3. Cả hai đều trống (project và DB mới) -> giá trị mặc định.
+     * Ở (2) và (3), kết quả được ghi vào DB để lần sau đi thẳng nhánh (1).
+     * Key nào Burp cũ không có cũng nhận mặc định, qua {@link #applySettings}.
+     */
+    private SettingsSource loadOrSeedSettings(Properties burpProperties) {
         Map<String, String> fromDb = databaseManager.loadSettings();
         if (!fromDb.isEmpty()) {
             applySettings(fromDb);
-            return;
+            return SettingsSource.DATABASE;
         }
+        Map<String, String> legacy = legacySettingsFromBurp(burpProperties);
+        applySettings(legacy);
+        persistSettingsNow();
+        if (legacy.isEmpty()) {
+            return SettingsSource.DEFAULTS;
+        }
+        api.logging().logToOutput("Migrated " + legacy.size() + " setting(s) from the Burp project into "
+                + databaseManager.currentDbPath());
+        return SettingsSource.BURP_LEGACY;
+    }
+
+    /** Các key cấu hình (không phải đường dẫn) mà project Burp còn giữ từ bản cũ. */
+    private Map<String, String> legacySettingsFromBurp(Properties burpProperties) {
         Map<String, String> legacy = new LinkedHashMap<>();
+        if (burpProperties == null) {
+            return legacy;
+        }
         for (String key : DB_SETTING_KEYS) {
-            String value = legacyBurpSettings == null ? null : legacyBurpSettings.getProperty(key);
+            String value = burpProperties.getProperty(key);
             if (value != null) {
                 legacy.put(key, value);
             }
         }
-        applySettings(legacy);
-        persistSettingsNow();
-        if (!legacy.isEmpty()) {
-            api.logging().logToOutput("Migrated " + legacy.size() + " setting(s) from the Burp project into the database.");
+        return legacy;
+    }
+
+    /** Đọc nguyên Properties đang lưu trong project Burp (đường dẫn + key cũ nếu còn). */
+    private Properties readBurpProperties() {
+        Properties props = new Properties();
+        try {
+            String settingsStr = api.persistence().extensionData().getString("settings");
+            if (settingsStr != null && !settingsStr.isEmpty()) {
+                props.load(new StringReader(settingsStr));
+            }
+        } catch (Exception e) {
+            api.logging().logToError("Failed to read settings from the Burp project: " + e.getMessage());
         }
+        return props;
     }
 
     /** Ghi duy nhất đường dẫn DB vào Burp; các key cấu hình cũ (nếu còn) được dọn đi. */
@@ -2259,17 +2305,13 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
      * File chưa có cấu hình thì được gieo bằng cấu hình đang dùng. Gọi từ EDT.
      */
     private void switchDatabase(String requestedPath) {
+        // Đọc Burp TRƯỚC khi ghi lại path: ngay sau nâng cấp Burp vẫn còn key cũ để gieo cho file mới.
+        Properties burpProperties = readBurpProperties();
         savedOutputPath = requestedPath;
         saveOutputPathToBurp();
         runOnDbThread(() -> {
             databaseManager.reopen(requestedPath);
-            Map<String, String> fromDb = databaseManager.loadSettings();
-            boolean seeded = fromDb.isEmpty();
-            if (seeded) {
-                persistSettingsNow();
-            } else {
-                applySettings(fromDb);
-            }
+            SettingsSource source = loadOrSeedSettings(burpProperties);
             pendingAnnotationKeys.clear();
             List<Object[]> rows = databaseManager.loadApiData();
             Map<String, DatabaseManager.ApiStatus> statuses = databaseManager.loadStatusIndex();
@@ -2281,9 +2323,11 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                     settingsForm.showCurrentValues();
                 }
                 populateTable(rows);
-                JOptionPane.showMessageDialog(null, seeded
-                        ? "Đã mở " + dbPath + "\nFile chưa có cấu hình, đã ghi cấu hình hiện tại vào đó."
-                        : "Đã mở " + dbPath + "\nĐã nạp cấu hình lưu trong file này lên form.");
+                JOptionPane.showMessageDialog(null, "Đã mở " + dbPath + "\n" + switch (source) {
+                    case DATABASE -> "Đã nạp cấu hình lưu trong file này lên form.";
+                    case BURP_LEGACY -> "File chưa có cấu hình, đã chuyển cấu hình cũ từ project Burp vào file.";
+                    case DEFAULTS -> "File chưa có cấu hình, đã dùng giá trị mặc định.";
+                });
             });
         });
     }
@@ -2314,15 +2358,7 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
      * hình cũ (bản trước lưu mọi thứ ở đây) sang DB một lần.
      */
     private Properties loadOutputPathFromBurp() {
-        Properties props = new Properties();
-        try {
-            String settingsStr = api.persistence().extensionData().getString("settings");
-            if (settingsStr != null && !settingsStr.isEmpty()) {
-                props.load(new StringReader(settingsStr));
-            }
-        } catch (Exception e) {
-            api.logging().logToError("Failed to load settings: " + e.getMessage());
-        }
+        Properties props = readBurpProperties();
         savedOutputPath = props.getProperty(currentOutputPathKey(), "");
         return props;
     }
