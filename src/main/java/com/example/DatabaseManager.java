@@ -67,11 +67,34 @@ public class DatabaseManager {
             // Tạo kết nối đến tệp SQLite.
             connection = DriverManager.getConnection("jdbc:sqlite:" + this.dbPath);
             api.logging().logToOutput("Successfully connected to SQLite database: " + this.dbPath);
+            configureConnection();
             
             // Tạo bảng nếu nó chưa tồn tại.
             createTableIfNotExists();
         } catch (SQLException | ClassNotFoundException e) {
             api.logging().logToError("Failed to initialize SQLite database: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * WAL: ghi nối vào file -wal thay vì ghi đè + fsync cả trang cho mỗi commit, và đọc không bị
+     * ghi chặn. synchronous=NORMAL chỉ fsync ở checkpoint: crash Burp vẫn an toàn tuyệt đối, mất
+     * điện có thể mất vài giao dịch cuối nhưng file không hỏng. busy_timeout để nhiều project
+     * Burp dùng chung một file chờ nhau thay vì báo lỗi SQLITE_BUSY ngay.
+     */
+    private void configureConnection() {
+        try (Statement stmt = connection.createStatement()) {
+            try (ResultSet rs = stmt.executeQuery("PRAGMA journal_mode=WAL")) {
+                String mode = rs.next() ? rs.getString(1) : "?";
+                if (!"wal".equalsIgnoreCase(mode)) {
+                    // Ví dụ file nằm trên ổ mạng không hỗ trợ WAL: SQLite giữ chế độ cũ, vẫn chạy đúng.
+                    api.logging().logToOutput("SQLite WAL not available for " + dbPath + ", journal_mode=" + mode);
+                }
+            }
+            stmt.execute("PRAGMA synchronous=NORMAL");
+            stmt.execute("PRAGMA busy_timeout=5000");
+        } catch (SQLException e) {
+            api.logging().logToError("Failed to configure SQLite connection: " + e.getMessage(), e);
         }
     }
 

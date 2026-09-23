@@ -293,12 +293,19 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
                 String host = request.httpService().host();
                 String path = normalizePath(rawPath);
 
+                // Scanner: API đã quét xong thì mọi request tiếp theo đều vô ích -> thoát trước khi parse param.
+                if (fromScanner && isFullyScanned(method, host, path)) {
+                    return ResponseReceivedAction.continueWith(response);
+                }
+
                 // Trích xuất tất cả tham số từ cả URL và body.
                 Set<String> requestParams = extractParameters(request);
 
                 // Trường hợp 1: Request từ Scanner -> xử lý các tham số đã được quét.
                 if (fromScanner) {
-                    submitDbTask(() -> databaseManager.processScannedParameters(method, host, path, requestParams));
+                    if (mayScanKnownParams(method, host, path, requestParams)) {
+                        submitDbTask(() -> databaseManager.processScannedParameters(method, host, path, requestParams));
+                    }
                 }
                 // Trường hợp 2: Request từ các công cụ khác (Proxy, Repeater) đã qua lọc scope/extension ở trên.
                 else {
@@ -386,6 +393,33 @@ public class RecheckScanApiExtension implements BurpExtension, ExtensionUnloadin
     boolean needsAutoBypassWrite(String method, String host, String path) {
         DatabaseManager.ApiStatus status = statusCache.get(DatabaseManager.statusKey(method, host, path));
         return status == null || !(status.bypassed || status.scanned || status.rejected);
+    }
+
+    /** API đã được đánh dấu quét xong (không còn param chưa quét) theo cache. */
+    boolean isFullyScanned(String method, String host, String path) {
+        DatabaseManager.ApiStatus status = statusCache.get(DatabaseManager.statusKey(method, host, path));
+        return status != null && status.scanned;
+    }
+
+    /**
+     * Request của Scanner có thể đánh dấu param nào không. Bỏ qua (không SQL) khi cache biết API
+     * mà request không chứa param nào của nó. API chưa có trong cache thì vẫn gửi xuống DB, để
+     * không bỏ sót trong quãng cache đang được nạp lại.
+     */
+    boolean mayScanKnownParams(String method, String host, String path, Set<String> requestParams) {
+        if (requestParams.isEmpty()) {
+            return false;
+        }
+        DatabaseManager.ApiStatus status = statusCache.get(DatabaseManager.statusKey(method, host, path));
+        if (status == null) {
+            return true;
+        }
+        for (String param : requestParams) {
+            if (status.knownParams.contains(param)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
